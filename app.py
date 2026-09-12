@@ -458,7 +458,7 @@ def render_simulation():
     col_map, col_details = st.columns([2, 1])
 
     with col_map:
-        st.subheader("🗺 Carte, KPI temps réel et suivi — tout est calculé côté navigateur")
+        st.subheader("🗺 Carte")
 
         route_colors = ["blue", "green", "purple", "orange", "darkred", "cadetblue"]
 
