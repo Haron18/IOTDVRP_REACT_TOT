@@ -30,11 +30,13 @@ IOTDVRP_complet/
 
 Fonctionnalités incluses : optimisation OR-Tools multi-trajets automatique, horloge
 de simulation unique démarrée à 0 (bouton "🚀 Démarrer la simulation"), carte animée
-en React avec tableau de bord complet (KPI, tableau des commandes, données finales)
-— **tout calculé et affiché côté navigateur, sans aucune resynchronisation Python
-périodique** pendant que la simulation tourne. Événements dynamiques (annulation
-manuelle restreinte aux commandes non livrées, panne, embouteillage...), état initial
-avant démarrage.
+en React avec tableau de bord complet — horloge au format HH:MM, KPI, tableau des
+commandes (masque les commandes pas encore visibles, indique clairement les commandes
+livrées), panneau de résultats finaux — **tout calculé et affiché côté navigateur,
+sans aucune resynchronisation Python périodique**. Bouton **"⏹️ Arrêter la
+simulation"**, et **arrêt automatique** dès que toutes les livraisons sont terminées.
+Événements dynamiques (annulation manuelle restreinte aux commandes non livrées,
+panne, embouteillage...), état initial avant démarrage.
 
 ## Étape 1 — Créer le nouveau dépôt GitHub
 
@@ -75,22 +77,25 @@ continu, qui se redéploie automatiquement à chaque nouveau commit sur `main`.
 ## Étape 4 — Vérifier
 
 - Ouvrez l'URL, cliquez sur **🚀 Démarrer la simulation**
-- La carte, les KPI et le tableau (composant React) doivent s'afficher
-- Activez **▶️ Simulation temps réel** : l'horloge, les camions, les KPI et le tableau
-  avancent tout seuls, entièrement côté navigateur — vérifiez dans l'onglet réseau de
-  votre navigateur qu'aucune requête Streamlit périodique n'a lieu pendant ce temps
-- En cas de souci : **Manage app** (en bas à droite sur Streamlit Cloud) → onglet **logs**
+- La carte, l'horloge, les KPI et le tableau (composant React) doivent s'afficher
+- Activez **▶️ Simulation temps réel** : l'horloge (format HH:MM), les camions, les
+  KPI et le tableau avancent tout seuls
+- Cliquez sur **⏹️ Arrêter la simulation** pour stopper manuellement à tout moment
+- Laissez tourner jusqu'à la fin : la simulation doit **s'arrêter d'elle-même** dès
+  que toutes les commandes sont livrées, et le panneau "🎉 Tournée terminée" doit
+  afficher les résultats finaux
 
 ## Comment ça marche (résumé technique)
 
 Python calcule les itinéraires OR-Tools **une seule fois** par action réelle
 (démarrage, événement dynamique, changement de paramètre) et transmet au composant
 React **toutes** les commandes (avec leur `release_time`) plus les itinéraires
-complets. Ensuite, le composant fait vivre la simulation entièrement lui-même :
+complets. Le composant fait ensuite vivre la simulation entièrement lui-même :
 horloge, position des camions, apparition progressive des commandes, KPI, tableau —
-aucun appel serveur périodique. Le composant ne renvoie une valeur à Python que
-lorsqu'une commande est réellement livrée (pour mettre à jour la liste des commandes
-annulables dans la barre latérale) — un événement ponctuel, pas un sondage.
+aucun appel serveur périodique. Il ne renvoie une valeur à Python que (a) lorsqu'une
+commande est réellement livrée, ou (b) lorsque toutes les livraisons sont terminées
+(ce qui déclenche l'arrêt automatique côté Python) — des événements ponctuels, jamais
+un sondage.
 
 ## Problèmes fréquents
 

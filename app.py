@@ -87,6 +87,7 @@ DEFAULTS = {
     "sim_clock_min": 0.0,     # point de départ de l'horloge transmis au composant React,
                                # qui la fait ensuite avancer lui-même (voir dvrp_map_component)
     "simulation_started": False,  # l'horloge ne bouge pas tant que ce n'est pas True
+    "auto_run_active": False,     # état du toggle "Simulation temps réel" (clé du widget)
     "initial_snapshot": None, # paramètres au démarrage (capturés une fois)
 }
 for key, default in DEFAULTS.items():
@@ -167,19 +168,21 @@ if reset_clicked:
 if manual_advance_clicked:
     st.session_state.sim_clock_min = min(1440.0, st.session_state.sim_clock_min + 10.0)
 
-auto_run = st.sidebar.toggle("▶️ Simulation temps réel (auto-refresh)", value=False)
+auto_run = st.sidebar.toggle("▶️ Simulation temps réel (auto-refresh)", key="auto_run_active")
+if st.sidebar.button("⏹️ Arrêter la simulation"):
+    st.session_state.auto_run_active = False
+    st.rerun()
 auto_run = auto_run and st.session_state.simulation_started
 
 sim_time = st.sidebar.slider(
-    "🕐 Temps de simulation (point de départ transmis au navigateur)", 0.0, 1440.0, step=5.0,
+    "🕐 Heure de départ de la tournée", 0.0, 1440.0, step=5.0,
     format="%.0f", key="sim_clock_min",
-    help="Une fois transmise au composant de carte, l'horloge avance ensuite SEULE, "
-         "côté navigateur (React), tant que « Simulation temps réel » est actif — "
-         "aucune resynchronisation Python périodique. Ce curseur ne bouge donc que "
-         "lorsque vous agissez vous-même (+10 min, reset, événement).",
+    help="Une fois la simulation lancée, l'horloge avance ensuite toute seule dans "
+         "votre navigateur (aucun rechargement de page nécessaire). Ce curseur ne "
+         "bouge que lorsque vous agissez vous-même (+10 min, reset, événement).",
 )
 sim_time = int(sim_time)
-st.sidebar.caption(f"⏱️ Point de départ : {sim_time // 60}h{sim_time % 60:02d}")
+st.sidebar.caption(f"⏱️ {sim_time // 60:02d}:{sim_time % 60:02d}")
 
 # État initial ("avant démarrage") : capturé une seule fois (premier chargement de l'app,
 # ou clic sur "🔄 Réinitialiser l'horloge"). Reste figé pendant toute la simulation, pour
@@ -538,6 +541,14 @@ def render_simulation():
         )
         if result:
             st.session_state.delivered_ids = set(result.get("delivered_ids", []))
+            # Arrêt automatique de la simulation temps réel dès que toutes les livraisons
+            # sont terminées (le composant React le signale via all_finished). Protégé par
+            # la vérification de auto_run_active pour ne déclencher ce rerun qu'une seule
+            # fois (pas de boucle infinie une fois la simulation arrêtée).
+            if result.get("all_finished") and st.session_state.auto_run_active:
+                st.session_state.auto_run_active = False
+                log_event("⏹️ Simulation arrêtée automatiquement — toutes les livraisons sont terminées.")
+                st.rerun()
 
         st.caption(
             f"🕒 Accélération : {time_accel_label.lower()} · 🚚 Vitesse moyenne assumée : "

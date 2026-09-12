@@ -5,6 +5,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 
 const PRIORITY_COLOR = { URGENTE: "red", HAUTE: "orange", NORMALE: "blue" };
+const PRIORITY_LABEL = { URGENTE: "🔴 Urgente", HAUTE: "🟠 Haute", NORMALE: "🔵 Normale" };
 
 function haversineKm(lat1, lon1, lat2, lon2) {
   const R = 6371.0;
@@ -35,9 +36,13 @@ function interpolate(shape, cumKm, targetKm) {
   return shape[shape.length - 1];
 }
 
-function fmtMin(min) {
+// Horloge affichée au format HH:MM (24h, plafonné à un jour de simulation) — plus
+// lisible et plus "conviviale" qu'un affichage brut en minutes.
+function fmtClock(min) {
   const m = Math.max(0, Math.round(min));
-  return Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0");
+  const h = Math.floor(m / 60) % 24;
+  const mm = m % 60;
+  return String(h).padStart(2, "0") + ":" + String(mm).padStart(2, "0");
 }
 
 /**
@@ -81,7 +86,7 @@ function DvrpMap({ args }) {
     simClockMin: simClockStartMin,
     visibleCount: 0,
     totalOrders: orders.length,
-    deliveredCount: 0,
+    deliveredIds: [],
     distanceParcourue: 0,
     allFinished: false,
   });
@@ -198,14 +203,15 @@ function DvrpMap({ args }) {
       if (now - lastUiUpdate > 250) {
         lastUiUpdate = now;
         const visibleCount = orders.filter((o) => o.release_time <= simClockMin).length;
+        const deliveredIds = Array.from(deliveredSet);
         setKpi({
           simClockMin, visibleCount, totalOrders: orders.length,
-          deliveredCount: deliveredSet.size, distanceParcourue, allFinished: allUsedFinished,
+          deliveredIds, distanceParcourue, allFinished: allUsedFinished,
         });
-        const reportKey = JSON.stringify(Array.from(deliveredSet).sort());
+        const reportKey = JSON.stringify(deliveredIds.sort());
         if (reportKey !== lastReportedRef.current) {
           lastReportedRef.current = reportKey;
-          Streamlit.setComponentValue({ delivered_ids: Array.from(deliveredSet), all_finished: allUsedFinished });
+          Streamlit.setComponentValue({ delivered_ids: deliveredIds, all_finished: allUsedFinished });
         }
       }
       frameId = requestAnimationFrame(animate);
@@ -228,50 +234,78 @@ function DvrpMap({ args }) {
     }
   });
 
+  const deliveredSet = new Set(kpi.deliveredIds);
+
+  // Le tableau n'affiche QUE les commandes déjà apparues (release_time atteint) ou
+  // annulées — les commandes "à venir" (pas encore révélées) sont volontairement
+  // masquées pour ne pas encombrer l'affichage avec des informations pas encore
+  // pertinentes. Chaque commande visible indique clairement si elle a été livrée.
   const tableRows = orders
-    .map((o) => ({
-      id: o.id, client: o.client, demand_kg: o.demand_kg, priority: o.priority,
-      status: o.is_new ? "🆕 Nouvelle" : "✅ Normale",
-      visible: o.release_time <= kpi.simClockMin,
-    }))
+    .filter((o) => o.release_time <= kpi.simClockMin)
+    .map((o) => {
+      let status;
+      if (deliveredSet.has(o.id)) status = "✅ Livrée";
+      else if (o.is_new) status = "🆕 Nouvelle — en livraison";
+      else status = "🚚 En livraison";
+      return { id: o.id, client: o.client, demand_kg: o.demand_kg, priority: o.priority, status };
+    })
     .concat(
       cancelledOrders.map((o) => ({
-        id: o.id, client: o.client, demand_kg: o.demand_kg, priority: o.priority,
-        status: "❌ Retirée", visible: true,
+        id: o.id, client: o.client, demand_kg: o.demand_kg, priority: o.priority, status: "❌ Retirée",
       }))
     );
 
+  const upcomingCount = kpi.totalOrders - kpi.visibleCount;
+
   return (
-    <div ref={wrapperRef} style={{ fontFamily: "sans-serif" }}>
+    <div ref={wrapperRef} style={{ fontFamily: "-apple-system, Segoe UI, Roboto, sans-serif" }}>
       <style>{
         ".truck-icon { font-size: 22px; line-height: 22px; text-align: center;" +
         "  filter: drop-shadow(0 0 2px rgba(0,0,0,.6)); }" +
         ".depot-icon { font-size: 22px; line-height: 22px; text-align: center; }" +
-        ".dvrp-kpis { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }" +
-        ".dvrp-kpi-card { flex: 1; min-width: 130px; background: #f0f2f6; border-radius: 8px; padding: 8px 12px; }" +
-        ".dvrp-kpi-label { font-size: 12px; color: #555; }" +
-        ".dvrp-kpi-value { font-size: 20px; font-weight: 600; }" +
-        ".dvrp-final { margin-top: 10px; background: #e8f5e9; border-radius: 8px; padding: 10px 14px; }" +
-        ".dvrp-table-wrap { margin-top: 10px; max-height: 240px; overflow-y: auto; border: 1px solid #eee; border-radius: 8px; }" +
+        ".dvrp-map-box { box-shadow: 0 1px 4px rgba(0,0,0,.12); }" +
+        ".dvrp-kpis { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }" +
+        ".dvrp-kpi-card { flex: 1; min-width: 140px; background: #f7f8fa; border: 1px solid #edeef2;" +
+        "  border-radius: 10px; padding: 10px 14px; transition: box-shadow .15s; }" +
+        ".dvrp-kpi-card:hover { box-shadow: 0 2px 6px rgba(0,0,0,.08); }" +
+        ".dvrp-kpi-label { font-size: 12px; color: #666; display: flex; align-items: center; gap: 5px; }" +
+        ".dvrp-kpi-value { font-size: 22px; font-weight: 650; margin-top: 2px; color: #1a1a1a; }" +
+        ".dvrp-kpi-sub { font-size: 11px; color: #999; margin-top: 1px; }" +
+        ".dvrp-live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }" +
+        ".dvrp-live-dot.on { background: #2ecc71; box-shadow: 0 0 0 3px rgba(46,204,113,.25); }" +
+        ".dvrp-live-dot.off { background: #bbb; }" +
+        ".dvrp-final { margin-top: 12px; border-radius: 10px; padding: 12px 16px; line-height: 1.6; }" +
+        ".dvrp-final.done { background: #e9f9ee; border: 1px solid #b7ebc6; }" +
+        ".dvrp-final.pending { background: #fff8e1; border: 1px solid #ffe7a0; }" +
+        ".dvrp-table-wrap { margin-top: 12px; max-height: 260px; overflow-y: auto; border: 1px solid #edeef2;" +
+        "  border-radius: 10px; }" +
         ".dvrp-table { width: 100%; border-collapse: collapse; font-size: 13px; }" +
-        ".dvrp-table th, .dvrp-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #f0f0f0; }" +
-        ".dvrp-table th { position: sticky; top: 0; background: #fafafa; }"
+        ".dvrp-table th, .dvrp-table td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #f3f3f3; }" +
+        ".dvrp-table th { position: sticky; top: 0; background: #fafbfc; font-weight: 600; color: #555; }" +
+        ".dvrp-table tr:hover td { background: #fafbfc; }" +
+        ".dvrp-empty { padding: 14px; text-align: center; color: #999; font-size: 13px; }"
       }</style>
 
-      <div ref={mapContainerRef} style={{ width: "100%", height: height + "px", borderRadius: 8 }} />
+      <div ref={mapContainerRef} className="dvrp-map-box"
+        style={{ width: "100%", height: height + "px", borderRadius: 10 }} />
 
       <div className="dvrp-kpis">
         <div className="dvrp-kpi-card">
-          <div className="dvrp-kpi-label">⏱️ Temps de simulation</div>
-          <div className="dvrp-kpi-value">{fmtMin(kpi.simClockMin)}</div>
+          <div className="dvrp-kpi-label">
+            <span className={"dvrp-live-dot " + (autoRun ? "on" : "off")} />
+            Horloge de simulation
+          </div>
+          <div className="dvrp-kpi-value">{fmtClock(kpi.simClockMin)}</div>
+          <div className="dvrp-kpi-sub">{autoRun ? "En direct" : "En pause"}</div>
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">📋 Commandes visibles</div>
           <div className="dvrp-kpi-value">{kpi.visibleCount} / {kpi.totalOrders}</div>
+          {upcomingCount > 0 && <div className="dvrp-kpi-sub">{upcomingCount} à venir</div>}
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">✅ Commandes livrées</div>
-          <div className="dvrp-kpi-value">{kpi.deliveredCount}</div>
+          <div className="dvrp-kpi-value">{kpi.deliveredIds.length} / {kpi.totalOrders}</div>
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">📏 Distance parcourue</div>
@@ -284,32 +318,39 @@ function DvrpMap({ args }) {
       </div>
 
       {kpi.allFinished ? (
-        <div className="dvrp-final">
-          <b>📊 Données finales — tournée terminée</b><br />
-          Distance planifiée : {plannedDistanceKm.toFixed(1)} km (vs {baselineDistanceKm.toFixed(1)} km sans
-          optimisation, soit -{gainPct.toFixed(0)} %) · Commandes livrées : {kpi.deliveredCount} / {kpi.totalOrders}
-          {" "}· Temps simulé écoulé : {fmtMin(kpi.simClockMin)}
+        <div className="dvrp-final done">
+          <b>🎉 Tournée terminée — résultats finaux</b><br />
+          📏 Distance planifiée : <b>{plannedDistanceKm.toFixed(1)} km</b> (vs {baselineDistanceKm.toFixed(1)} km
+          sans optimisation, soit <b>-{gainPct.toFixed(0)} %</b>)<br />
+          ✅ Commandes livrées : <b>{kpi.deliveredIds.length} / {kpi.totalOrders}</b>
+          {" "}· ⏱️ Temps simulé écoulé : <b>{fmtClock(kpi.simClockMin)}</b>
         </div>
       ) : (
-        <div className="dvrp-final" style={{ background: "#fff8e1" }}>
-          ⏳ Simulation en cours — {kpi.deliveredCount} commande(s) livrée(s) sur {kpi.totalOrders}.
+        <div className="dvrp-final pending">
+          ⏳ Simulation en cours — <b>{kpi.deliveredIds.length}</b> commande(s) livrée(s) sur{" "}
+          <b>{kpi.totalOrders}</b>. Les résultats finaux (distance, gain d'optimisation) s'afficheront
+          ici une fois la tournée terminée.
         </div>
       )}
 
       <div className="dvrp-table-wrap">
-        <table className="dvrp-table">
-          <thead>
-            <tr><th>ID</th><th>Client</th><th>Kg</th><th>Priorité</th><th>État</th><th>Visible</th></tr>
-          </thead>
-          <tbody>
-            {tableRows.map((r) => (
-              <tr key={r.id}>
-                <td>{r.id}</td><td>{r.client}</td><td>{r.demand_kg}</td><td>{r.priority}</td>
-                <td>{r.status}</td><td>{r.visible ? "Oui" : "À venir"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {tableRows.length === 0 ? (
+          <div className="dvrp-empty">Aucune commande visible pour le moment.</div>
+        ) : (
+          <table className="dvrp-table">
+            <thead>
+              <tr><th>ID</th><th>Client</th><th>Kg</th><th>Priorité</th><th>État</th></tr>
+            </thead>
+            <tbody>
+              {tableRows.map((r) => (
+                <tr key={r.id}>
+                  <td>{r.id}</td><td>{r.client}</td><td>{r.demand_kg}</td>
+                  <td>{PRIORITY_LABEL[r.priority] || r.priority}</td><td>{r.status}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );
