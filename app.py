@@ -88,11 +88,24 @@ DEFAULTS = {
                                # qui la fait ensuite avancer lui-même (voir dvrp_map_component)
     "simulation_started": False,  # l'horloge ne bouge pas tant que ce n'est pas True
     "auto_run_active": False,     # état du toggle "Simulation temps réel" (clé du widget)
+    "stop_requested": False,  # demande d'arrêt (manuel ou automatique), appliquée au
+                               # tout début du prochain script run, AVANT que le toggle
+                               # ne soit recréé (Streamlit interdit de modifier la clé
+                               # d'un widget après qu'il a déjà été instancié dans le
+                               # même run — voir section 3 plus bas).
     "initial_snapshot": None, # paramètres au démarrage (capturés une fois)
 }
 for key, default in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+# Applique une demande d'arrêt en attente AVANT toute création de widget : c'est le
+# seul moment sûr pour modifier st.session_state["auto_run_active"], la clé du toggle
+# "Simulation temps réel" plus bas (Streamlit refuse cette modification une fois le
+# widget déjà instancié dans le run courant — StreamlitWidgetAlreadyInstantiatedError).
+if st.session_state.stop_requested:
+    st.session_state.auto_run_active = False
+    st.session_state.stop_requested = False
 
 
 def log_event(message: str) -> None:
@@ -169,8 +182,8 @@ if manual_advance_clicked:
     st.session_state.sim_clock_min = min(1440.0, st.session_state.sim_clock_min + 10.0)
 
 auto_run = st.sidebar.toggle("▶️ Simulation temps réel (auto-refresh)", key="auto_run_active")
-if st.sidebar.button("⏹️ Arrêter la simulation"):
-    st.session_state.auto_run_active = False
+if st.sidebar.button("⏹️ Arrêter la simulation") and auto_run:
+    st.session_state.stop_requested = True
     st.rerun()
 auto_run = auto_run and st.session_state.simulation_started
 
@@ -542,11 +555,13 @@ def render_simulation():
         if result:
             st.session_state.delivered_ids = set(result.get("delivered_ids", []))
             # Arrêt automatique de la simulation temps réel dès que toutes les livraisons
-            # sont terminées (le composant React le signale via all_finished). Protégé par
-            # la vérification de auto_run_active pour ne déclencher ce rerun qu'une seule
-            # fois (pas de boucle infinie une fois la simulation arrêtée).
+            # sont terminées (le composant React le signale via all_finished). On ne peut
+            # pas modifier auto_run_active ici directement (le toggle est déjà instancié
+            # dans CE run) : on passe par stop_requested, appliqué au tout début du
+            # prochain run. Protégé par la vérification de auto_run_active pour ne
+            # déclencher ce rerun qu'une seule fois (pas de boucle infinie une fois arrêté).
             if result.get("all_finished") and st.session_state.auto_run_active:
-                st.session_state.auto_run_active = False
+                st.session_state.stop_requested = True
                 log_event("⏹️ Simulation arrêtée automatiquement — toutes les livraisons sont terminées.")
                 st.rerun()
 
