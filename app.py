@@ -453,17 +453,10 @@ def render_simulation():
             f"la capacité en un seul passage est insuffisante avec les paramètres actuels."
         )
 
-    st.markdown("##### 📏 Preuve d'optimisation — distance réellement parcourue")
-    d1, d2, d3 = st.columns(3)
-    d1.metric("Distance après l'optimisation (OR-Tools)", f"{optimized_distance_km:.1f} km")
-    d2.metric("Distance avant l'optimisation", f"{baseline_distance_km:.1f} km")
-    d3.metric("Gain apporté par l'optimisation", f"-{gain_pct:.0f} %", delta=f"-{gain_km:.1f} km", delta_color="normal")
-    st.caption(
-        "La « référence » affecte les commandes aux véhicules dans leur ordre d'apparition, "
-        "sans aucune optimisation de séquence ni de répartition. La différence avec la colonne "
-        "de gauche mesure ce qu'OR-Tools apporte réellement (même contrainte de capacité, "
-        "mêmes distances routières réelles OSRM pour les deux)."
-    )
+    # La preuve d'optimisation (distance avant/après, gain) n'est plus affichée ici de
+    # façon statique — elle apparaît désormais dans le panneau "🎉 Tournée terminée" du
+    # composant React, une fois la simulation effectivement terminée (voir plus bas :
+    # planned_distance_km / baseline_distance_km / gain_pct transmis à dvrp_map()).
 
     if st.session_state.logs:
         st.info(f"Dernier événement : {st.session_state.logs[0]}")
