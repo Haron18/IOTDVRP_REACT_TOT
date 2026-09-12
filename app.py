@@ -182,8 +182,9 @@ if manual_advance_clicked:
     st.session_state.sim_clock_min = min(1440.0, st.session_state.sim_clock_min + 10.0)
 
 auto_run = st.sidebar.toggle("▶️ Simulation temps réel (auto-refresh)", key="auto_run_active")
-if st.sidebar.button("⏹️ Arrêter la simulation") and auto_run:
-    st.session_state.stop_requested = True
+if st.sidebar.button("⏹️ Arrêter la simulation") and st.session_state.simulation_started:
+    st.session_state.stop_requested = True  # coupera auto_run_active au tout début du prochain run
+    st.session_state.simulation_started = False  # fait réapparaître le bouton "🚀 Démarrer"
     st.rerun()
 auto_run = auto_run and st.session_state.simulation_started
 
