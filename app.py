@@ -188,15 +188,7 @@ if st.sidebar.button("⏹️ Arrêter la simulation") and st.session_state.simul
     st.rerun()
 auto_run = auto_run and st.session_state.simulation_started
 
-sim_time = st.sidebar.slider(
-    "🕐 Heure de départ de la tournée", 0.0, 1440.0, step=5.0,
-    format="%.0f", key="sim_clock_min",
-    help="Une fois la simulation lancée, l'horloge avance ensuite toute seule dans "
-         "votre navigateur (aucun rechargement de page nécessaire). Ce curseur ne "
-         "bouge que lorsque vous agissez vous-même (+10 min, reset, événement).",
-)
-sim_time = int(sim_time)
-st.sidebar.caption(f"⏱️ {sim_time // 60:02d}:{sim_time % 60:02d}")
+sim_time = int(st.session_state.sim_clock_min)
 
 # État initial ("avant démarrage") : capturé une seule fois (premier chargement de l'app,
 # ou clic sur "🔄 Réinitialiser l'horloge"). Reste figé pendant toute la simulation, pour
