@@ -117,7 +117,7 @@ def log_event(message: str) -> None:
 # 2. EN-TÊTE
 # ----------------------------------------------------------------------------
 st.title("🚚 Tracking en temps réel pour l'optimisation logistique : cas les tournées dynamiques DVRP")
-st.caption("Alger — livraison de produits frais / express — OSRM + Google OR-Tools + MQTT")
+st.caption("Alger — livraison de produits frais / express")
 st.markdown("---")
 
 # ----------------------------------------------------------------------------
