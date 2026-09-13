@@ -383,6 +383,24 @@ def render_simulation():
             f"{effective_vehicles}/{num_vehicles} véhicule(s) réellement disponibles."
         )
 
+    # GARDE-FOU EXPLICITE : on retire une seconde fois, juste avant de construire les
+    # données envoyées au solveur, toute commande déjà livrée. Le filtre plus haut
+    # (ligne "active_orders = non_cancelled_orders[...]") suffit en théorie, mais cette
+    # étape est délibérément dupliquée ICI, au point d'entrée réel d'OR-Tools, pour
+    # qu'aucune commande livrée ne puisse JAMAIS lui être transmise — même si une future
+    # modification venait, par erreur, à casser ou contourner le filtre initial.
+    leaked_delivered = active_orders[active_orders["id"].isin(st.session_state.delivered_ids)]
+    if not leaked_delivered.empty:
+        # Ne devrait jamais arriver : on log l'anomalie plutôt que de planter, puis on
+        # retire quand même ces commandes avant l'appel à OR-Tools.
+        log_event(
+            f"⚠️ Anomalie interne : {len(leaked_delivered)} commande(s) déjà livrée(s) "
+            f"détectée(s) juste avant l'appel OR-Tools — retirées par sécurité."
+        )
+        active_orders = active_orders[
+            ~active_orders["id"].isin(st.session_state.delivered_ids)
+        ].reset_index(drop=True)
+
     total_demand = int(active_orders["demand_kg"].sum())
 
     if len(active_orders) > 0:
