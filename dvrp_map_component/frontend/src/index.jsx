@@ -308,13 +308,14 @@ function DvrpMap({ args }) {
           <div className="dvrp-kpi-sub">{autoRun ? "En direct" : "En pause"}</div>
         </div>
         <div className="dvrp-kpi-card">
-          <div className="dvrp-kpi-label">📋 Commandes visibles</div>
-          <div className="dvrp-kpi-value">{kpi.visibleCount} / {kpi.totalOrders}</div>
-          {upcomingCount > 0 && <div className="dvrp-kpi-sub">{upcomingCount} pas encore arrivée(s)</div>}
+          <div className="dvrp-kpi-label">📋 Commandes arrivées</div>
+          <div className="dvrp-kpi-value">{kpi.visibleCount}</div>
+          <div className="dvrp-kpi-sub">sur {kpi.totalOrders} au total{upcomingCount > 0 ? ` (${upcomingCount} pas encore arrivée(s))` : ""}</div>
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">✅ Commandes livrées</div>
-          <div className="dvrp-kpi-value">{kpi.deliveredIds.length} / {kpi.totalOrders}</div>
+          <div className="dvrp-kpi-value">{kpi.deliveredIds.length}</div>
+          <div className="dvrp-kpi-sub">sur {kpi.totalOrders} au total</div>
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">📏 Distance parcourue</div>

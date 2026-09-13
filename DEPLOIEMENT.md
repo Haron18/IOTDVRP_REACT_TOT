@@ -31,13 +31,14 @@ IOTDVRP_complet/
 Fonctionnalités incluses : optimisation OR-Tools multi-trajets automatique, horloge
 de simulation unique démarrée à 0 (bouton "🚀 Démarrer la simulation"), bouton
 "⏹️ Arrêter la simulation" + arrêt automatique en fin de tournée, carte animée en
-React avec tableau de bord complet (horloge HH:MM, KPI, tableau des commandes visibles
-avec leur statut de livraison, panneau de résultats finaux) — tout calculé côté
-navigateur, avec resynchronisation ponctuelle de l'horloge Python (à chaque livraison,
-fin de tournée, ou ~20 min simulées) pour éviter tout retour en arrière visuel lors
-d'un événement. Événements dynamiques (annulation manuelle restreinte aux commandes
-non livrées, panne, embouteillage...). Affichage permanent des paramètres actuellement
-choisis par l'utilisateur (dataset, camions, capacité, vitesse, accélération).
+React avec tableau de bord complet — horloge HH:MM, KPI en temps réel (nombre de
+commandes arrivées et livrées affiché directement, mis à jour à chaque arrivée/
+livraison), tableau des commandes visibles avec leur statut de livraison, panneau de
+résultats finaux — tout calculé côté navigateur, avec resynchronisation ponctuelle de
+l'horloge Python (à chaque livraison, fin de tournée, ou ~20 min simulées) pour éviter
+tout retour en arrière visuel lors d'un événement. Événements dynamiques (annulation
+manuelle restreinte aux commandes non livrées, panne, embouteillage...). Affichage
+permanent des paramètres actuellement choisis par l'utilisateur.
 
 ## Étape 1 — Créer le nouveau dépôt GitHub
 
@@ -79,13 +80,13 @@ continu, qui se redéploie automatiquement à chaque nouveau commit sur `main`.
 
 - Ouvrez l'URL, cliquez sur **🚀 Démarrer la simulation**
 - La carte, l'horloge, les KPI et le tableau (composant React) doivent s'afficher
-- Activez **▶️ Simulation temps réel** : l'horloge (HH:MM), les camions, les KPI et
-  le tableau avancent tout seuls
+- Activez **▶️ Simulation temps réel** : l'horloge (HH:MM), les camions, les KPI
+  ("Commandes arrivées" / "Commandes livrées") et le tableau avancent tout seuls
 - Cliquez sur **⏹️ Arrêter la simulation** pour stopper manuellement à tout moment
 - Laissez tourner jusqu'à la fin : la simulation doit **s'arrêter d'elle-même** et
   afficher les résultats finaux
 - Déclenchez un événement (ex. panne véhicule) en cours de route : les camions ne
-  doivent **plus repartir du début** (bug corrigé)
+  doivent **pas repartir du début**
 
 ## Comment ça marche (résumé technique)
 
