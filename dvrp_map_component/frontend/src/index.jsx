@@ -264,8 +264,6 @@ function DvrpMap({ args }) {
       }))
     );
 
-  const upcomingCount = kpi.totalOrders - kpi.visibleCount;
-
   return (
     <div ref={wrapperRef} style={{ fontFamily: "-apple-system, Segoe UI, Roboto, sans-serif" }}>
       <style>{
@@ -310,12 +308,10 @@ function DvrpMap({ args }) {
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">📋 Commandes arrivées</div>
           <div className="dvrp-kpi-value">{kpi.visibleCount}</div>
-          <div className="dvrp-kpi-sub">sur {kpi.totalOrders} au total{upcomingCount > 0 ? ` (${upcomingCount} pas encore arrivée(s))` : ""}</div>
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">✅ Commandes livrées</div>
           <div className="dvrp-kpi-value">{kpi.deliveredIds.length}</div>
-          <div className="dvrp-kpi-sub">sur {kpi.totalOrders} au total</div>
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">📏 Distance parcourue</div>
