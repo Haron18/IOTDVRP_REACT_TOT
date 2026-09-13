@@ -76,6 +76,13 @@ function DvrpMap({ args }) {
     gain_pct: gainPct = 0,
     num_vehicles_used: numVehiclesUsed = 0,
     num_vehicles_total: numVehiclesTotal = 0,
+    // CORRECTIF (compteurs "commandes livrées" / "distance parcourue" erronés) :
+    // historique fiable transmis par Python (session_state, jamais réinitialisé),
+    // utilisé pour AMORCER les compteurs de ce composant au lieu de repartir de
+    // zéro à chaque remontage (voir plus bas pourquoi un remontage a lieu à
+    // chaque recalcul OR-Tools, donc à chaque livraison ou nouvelle commande).
+    already_delivered_ids: alreadyDeliveredIds = [],
+    already_traveled_km: alreadyTraveledKm = 0,
   } = args;
 
   const wrapperRef = useRef(null);
@@ -94,8 +101,13 @@ function DvrpMap({ args }) {
     simClockMin: simClockStartMin,
     visibleCount: 0,
     totalOrders: orders.length,
-    deliveredIds: [],
-    distanceParcourue: 0,
+    // Amorcés avec l'historique reçu de Python plutôt que [] / 0 : sans ça, le
+    // compteur "commandes livrées" et "distance parcourue" retombaient à leur
+    // valeur du segment courant (depuis le DERNIER recalcul OR-Tools) à chaque
+    // remontage du composant, au lieu de refléter le total depuis le début de
+    // la simulation.
+    deliveredIds: alreadyDeliveredIds,
+    distanceParcourue: alreadyTraveledKm,
     allFinished: false,
   });
 
@@ -204,13 +216,19 @@ function DvrpMap({ args }) {
         }
       });
 
-      const deliveredSet = new Set();
-      let distanceParcourue = 0;
+      // Amorcé avec l'historique (alreadyDeliveredIds) : une commande déjà livrée
+      // lors d'un PRÉCÉDENT plan reste comptée, même si elle n'apparaît plus du
+      // tout dans les tournées de ce nouveau plan (normal : elle est exclue du
+      // routage une fois livrée — voir dvrp_engine / app.py).
+      const deliveredSet = new Set(alreadyDeliveredIds);
+      // Distance parcourue DANS CE SEGMENT (depuis le dernier recalcul OR-Tools) —
+      // le cumul réel affiché/renvoyé ajoute `alreadyTraveledKm` plus bas.
+      let segmentDistanceKm = 0;
       let allUsedFinished = usedCount > 0;
       Object.values(truckStateRef.current).forEach((s) => {
         if (!s.used) return;
         const traveledKm = Math.min(s.totalKm, (s.speedKmh * (simClockMin - baseMin)) / 60);
-        distanceParcourue += traveledKm;
+        segmentDistanceKm += traveledKm;
         if (traveledKm < s.totalKm) allUsedFinished = false;
         const pos = interpolate(s.shape, s.cumKm, traveledKm);
         if (pos) s.marker.setLatLng(pos);
@@ -218,6 +236,14 @@ function DvrpMap({ args }) {
           if (traveledKm >= stop.cum_km) deliveredSet.add(stop.order_id);
         });
       });
+      // CORRECTIF (distance parcourue erronée) : `segmentDistanceKm` seul ne
+      // mesurait que la distance parcourue DEPUIS LE DERNIER RECALCUL OR-TOOLS,
+      // pas depuis le début de la simulation — puisqu'un recalcul (à chaque
+      // livraison ou nouvelle commande) remonte tout le composant et fait
+      // repartir chaque camion virtuellement de son point de départ de tournée.
+      // Le vrai cumulatif = ce qui était déjà acquis avant ce recalcul + le
+      // segment courant.
+      const distanceParcourue = alreadyTraveledKm + segmentDistanceKm;
 
       if (now - lastUiUpdate > 250) {
         lastUiUpdate = now;
@@ -241,6 +267,10 @@ function DvrpMap({ args }) {
           // Le checkpoint toutes les ~20 min simulées borne l'écart même sans livraison.
           Streamlit.setComponentValue({
             delivered_ids: deliveredIds, all_finished: allUsedFinished, sim_clock_min: simClockMin,
+            // Nouveau champ : permet à Python de conserver ce cumul comme point de
+            // départ ("checkpoint") du prochain recalcul OR-Tools, au lieu de
+            // perdre la distance déjà parcourue à chaque réoptimisation.
+            distance_parcourue_km: distanceParcourue,
           });
         }
       }

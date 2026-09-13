@@ -46,6 +46,8 @@ def dvrp_map(
     num_vehicles_total: int,
     height: int = 520,
     key: str | None = None,
+    already_delivered_ids: list | None = None,
+    already_traveled_km: float = 0.0,
 ):
     """
     depot_coords : (lat, lon)
@@ -65,8 +67,19 @@ def dvrp_map(
         (calculée une fois par Python), affichée dans le panneau "Données finales"
     num_vehicles_used, num_vehicles_total : pour le KPI "camions en tournée"
 
-    Retourne un dict {"delivered_ids": [...], "all_finished": bool} ou None tant que
-    rien n'a encore été livré — sert à mettre à jour la liste des commandes annulables.
+    already_delivered_ids : liste des identifiants déjà livrés selon Python
+        (st.session_state.delivered_ids — historique fiable, jamais réinitialisé).
+        Sert à AMORCER le compteur "commandes livrées" du composant, pour qu'il
+        reflète le total depuis le début de la simulation et non seulement les
+        commandes livrées depuis le dernier recalcul OR-Tools.
+    already_traveled_km : kilométrage déjà parcouru par la flotte selon Python
+        (checkpoint conservé entre deux recalculs). Sert à AMORCER le compteur
+        "distance parcourue" du composant pour la même raison.
+
+    Retourne un dict {"delivered_ids": [...], "all_finished": bool,
+    "distance_parcourue_km": float, ...} ou None tant que rien n'a encore été
+    livré — sert à mettre à jour la liste des commandes annulables et à
+    persister le checkpoint de distance pour le prochain recalcul.
     """
     return _dvrp_map_component(
         depot=list(depot_coords),
@@ -83,6 +96,8 @@ def dvrp_map(
         num_vehicles_total=num_vehicles_total,
         height=height,
         key=key,
+        already_delivered_ids=list(already_delivered_ids or []),
+        already_traveled_km=already_traveled_km,
         default=None,
     )
 

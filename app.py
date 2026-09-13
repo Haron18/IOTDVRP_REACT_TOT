@@ -84,6 +84,11 @@ DEFAULTS = {
     "traffic_penalty": 1.0,   # multiplicateur appliqué à la matrice de distances
     "delivered_ids": set(),   # commandes livrées, reçues depuis le composant React
                                # (calculées côté navigateur, pas par Python)
+    "traveled_km_checkpoint": 0.0,  # CORRECTIF distance/compteurs erronés : distance
+                               # totale déjà parcourue par la flotte depuis le début de
+                               # la simulation, conservée entre deux recalculs OR-Tools
+                               # (le composant React repart sinon de 0 à chaque recalcul,
+                               # voir dvrp_map_component/frontend/src/index.jsx)
     "sim_clock_min": 0.0,     # point de départ de l'horloge transmis au composant React,
                                # qui la fait ensuite avancer lui-même (voir dvrp_map_component)
     "simulation_started": False,  # l'horloge ne bouge pas tant que ce n'est pas True
@@ -177,6 +182,13 @@ reset_clicked = col_track2.button("🔄 Réinitialiser l'horloge")
 if reset_clicked:
     st.session_state.sim_clock_min = 0.0
     st.session_state.simulation_started = False
+    # CORRECTIF (compteurs "commandes livrées" / "distance parcourue" erronés) :
+    # un vrai redémarrage de l'horloge doit aussi remettre à zéro l'historique des
+    # livraisons et le checkpoint de distance — sinon les commandes de la simulation
+    # précédente restaient "livrées" pour toujours (donc jamais re-routées) et le
+    # compteur de distance repartait avec l'ancien total au lieu de 0.
+    st.session_state.delivered_ids = set()
+    st.session_state.traveled_km_checkpoint = 0.0
 if manual_advance_clicked:
     st.session_state.sim_clock_min = min(1440.0, st.session_state.sim_clock_min + 10.0)
 
@@ -621,8 +633,22 @@ def render_simulation():
             num_vehicles_total=num_vehicles,
             height=480,
             key="dvrp_map",
+            # CORRECTIF (compteurs "commandes livrées" / "distance parcourue" erronés) :
+            # on transmet l'historique fiable côté Python (jamais réinitialisé), pour
+            # que le composant amorce ses compteurs avec le total réel depuis le début
+            # de la simulation, au lieu de repartir de zéro à chaque recalcul OR-Tools
+            # (nouvelle commande, livraison, panne, etc. — voir index.jsx).
+            already_delivered_ids=list(st.session_state.delivered_ids),
+            already_traveled_km=st.session_state.traveled_km_checkpoint,
         )
         if result:
+            # Persiste le kilométrage cumulé rapporté par le composant : il sert de
+            # nouveau point de départ ("checkpoint") au prochain recalcul OR-Tools, pour
+            # que "distance parcourue" ne redescende jamais et reflète le vrai total.
+            reported_km = result.get("distance_parcourue_km")
+            if reported_km is not None:
+                st.session_state.traveled_km_checkpoint = float(reported_km)
+
             # CORRECTIF (bug de résurrection des commandes livrées) : on FUSIONNE
             # (union, |=) au lieu d'ÉCRASER (=) l'ensemble des commandes livrées.
             #
