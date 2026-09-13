@@ -53,10 +53,13 @@ function fmtClock(min) {
  * une fois toutes les données nécessaires (itinéraires + toutes les commandes avec leur
  * `release_time`) et fait vivre la simulation lui-même.
  *
- * Un seul retour vers Python (`Streamlit.setComponentValue`), et seulement quand
- * l'ensemble des commandes livrées change réellement — sert à alimenter la liste des
- * commandes annulables côté Python (barre latérale). Ce n'est pas du polling : c'est un
- * événement, déclenché uniquement quand quelque chose se produit réellement.
+ * Un retour vers Python (`Streamlit.setComponentValue`) a lieu quand l'ensemble des
+ * commandes livrées change, quand une NOUVELLE commande arrive (release_time atteint —
+ * ce qui déclenche une réoptimisation OR-Tools côté Python, rendant la planification
+ * réellement dynamique), quand la tournée se termine, ou environ toutes les 20 min
+ * simulées (pour garder l'horloge Python à peu près à jour). Ce retour inclut aussi
+ * l'horloge courante, pour éviter qu'un événement déclenché en cours de route ne
+ * reparte d'une horloge Python périmée.
  */
 function DvrpMap({ args }) {
   const {
@@ -81,6 +84,11 @@ function DvrpMap({ args }) {
   const truckStateRef = useRef({});
   const orderMarkersRef = useRef({});
   const lastReportedRef = useRef(null);
+  // Référence "légère" pour l'horloge : mise à jour SANS reconstruire la carte (voir
+  // plus bas). Sépare ce qui doit reconstruire visuellement la carte (itinéraires
+  // réellement différents) de ce qui ne doit que recaler discrètement le point de
+  // départ du calcul du temps (resynchronisation périodique avec Python, play/pause).
+  const baselineRef = useRef({ simClockStartMin, autoRun, startTime: performance.now() });
 
   const [kpi, setKpi] = useState({
     simClockMin: simClockStartMin,
@@ -91,13 +99,26 @@ function DvrpMap({ args }) {
     allFinished: false,
   });
 
+  // Clé structurelle : ne change QUE si les itinéraires (tracés, camions utilisés,
+  // vitesse) ou la liste des commandes changent réellement — jamais à cause de
+  // l'horloge ou du play/pause, qui sont gérés séparément ci-dessous sans jamais
+  // reconstruire la carte (ce qui causait un clignotement toutes les ~20 min
+  // simulées, à chaque resynchronisation ponctuelle de l'horloge avec Python).
   const structuralKey = JSON.stringify({
     depot,
     orders: orders.map((o) => o.id),
-    trucks: trucks.map((t) => ({ label: t.label, used: t.used, shape: t.shape, trip_shapes: t.trip_shapes })),
-    simClockStartMin,
-    autoRun,
+    trucks: trucks.map((t) => ({
+      label: t.label, used: t.used, shape: t.shape, trip_shapes: t.trip_shapes, speed_kmh: t.speed_kmh,
+    })),
+    simMinutesPerRealSecond,
   });
+
+  // Met à jour la référence d'horloge SANS reconstruire la carte — c'est ce qui permet
+  // à Python de resynchroniser sim_clock_start_min (toutes les ~20 min simulées, ou au
+  // play/pause) sans provoquer de saut visuel ni de perte de zoom.
+  useEffect(() => {
+    baselineRef.current = { simClockStartMin, autoRun, startTime: performance.now() };
+  }, [simClockStartMin, autoRun]);
 
   useEffect(() => {
     if (mapRef.current) {
@@ -162,15 +183,13 @@ function DvrpMap({ args }) {
     });
     truckStateRef.current = truckState;
 
-    const startTime = performance.now();
     let frameId;
     let lastUiUpdate = 0;
 
     function animate(now) {
-      const elapsedSec = (now - startTime) / 1000;
-      const simClockMin = autoRun
-        ? simClockStartMin + elapsedSec * simMinutesPerRealSecond
-        : simClockStartMin;
+      const { simClockStartMin: baseMin, autoRun: running } = baselineRef.current;
+      const elapsedSec = (now - baselineRef.current.startTime) / 1000;
+      const simClockMin = running ? baseMin + elapsedSec * simMinutesPerRealSecond : baseMin;
 
       orders.forEach((o) => {
         const entry = orderMarkersRef.current[o.id];
@@ -190,7 +209,7 @@ function DvrpMap({ args }) {
       let allUsedFinished = usedCount > 0;
       Object.values(truckStateRef.current).forEach((s) => {
         if (!s.used) return;
-        const traveledKm = Math.min(s.totalKm, (s.speedKmh * (simClockMin - simClockStartMin)) / 60);
+        const traveledKm = Math.min(s.totalKm, (s.speedKmh * (simClockMin - baseMin)) / 60);
         distanceParcourue += traveledKm;
         if (traveledKm < s.totalKm) allUsedFinished = false;
         const pos = interpolate(s.shape, s.cumKm, traveledKm);
@@ -208,10 +227,21 @@ function DvrpMap({ args }) {
           simClockMin, visibleCount, totalOrders: orders.length,
           deliveredIds, distanceParcourue, allFinished: allUsedFinished,
         });
-        const reportKey = JSON.stringify(deliveredIds.sort());
+        // `visibleCount` dans la clé : toute nouvelle commande qui "arrive" (release_time
+        // atteint) déclenche aussitôt un retour vers Python, qui relance alors une
+        // réoptimisation OR-Tools pour l'intégrer au plan — c'est ce qui rend la
+        // planification (et donc "Séquence de l'itinéraire") réellement dynamique.
+        const reportKey = JSON.stringify([deliveredIds.sort(), allUsedFinished, visibleCount, Math.floor(simClockMin / 20)]);
         if (reportKey !== lastReportedRef.current) {
           lastReportedRef.current = reportKey;
-          Streamlit.setComponentValue({ delivered_ids: deliveredIds, all_finished: allUsedFinished });
+          // On renvoie aussi l'horloge courante à Python à cette occasion (pas d'appel
+          // supplémentaire créé exprès pour ça) : ça évite qu'un événement déclenché en
+          // cours de route (ex. panne véhicule) ne reparte d'une horloge Python périmée
+          // et ne fasse "reculer" visuellement les camions au rechargement du composant.
+          // Le checkpoint toutes les ~20 min simulées borne l'écart même sans livraison.
+          Streamlit.setComponentValue({
+            delivered_ids: deliveredIds, all_finished: allUsedFinished, sim_clock_min: simClockMin,
+          });
         }
       }
       frameId = requestAnimationFrame(animate);
@@ -255,8 +285,6 @@ function DvrpMap({ args }) {
       }))
     );
 
-  const upcomingCount = kpi.totalOrders - kpi.visibleCount;
-
   return (
     <div ref={wrapperRef} style={{ fontFamily: "-apple-system, Segoe UI, Roboto, sans-serif" }}>
       <style>{
@@ -299,13 +327,12 @@ function DvrpMap({ args }) {
           <div className="dvrp-kpi-sub">{autoRun ? "En direct" : "En pause"}</div>
         </div>
         <div className="dvrp-kpi-card">
-          <div className="dvrp-kpi-label">📋 Commandes visibles</div>
-          <div className="dvrp-kpi-value">{kpi.visibleCount} / {kpi.totalOrders}</div>
-          {upcomingCount > 0 && <div className="dvrp-kpi-sub">{upcomingCount} à venir</div>}
+          <div className="dvrp-kpi-label">📋 Commandes arrivées</div>
+          <div className="dvrp-kpi-value">{kpi.visibleCount}</div>
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">✅ Commandes livrées</div>
-          <div className="dvrp-kpi-value">{kpi.deliveredIds.length} / {kpi.totalOrders}</div>
+          <div className="dvrp-kpi-value">{kpi.deliveredIds.length}</div>
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">📏 Distance parcourue</div>
