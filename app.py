@@ -605,7 +605,28 @@ def render_simulation():
             key="dvrp_map",
         )
         if result:
-            st.session_state.delivered_ids = set(result.get("delivered_ids", []))
+            # CORRECTIF (bug de résurrection des commandes livrées) : on FUSIONNE
+            # (union, |=) au lieu d'ÉCRASER (=) l'ensemble des commandes livrées.
+            #
+            # Pourquoi c'est nécessaire : à CHAQUE appel à OR-Tools (nouvelle commande
+            # arrivée, annulation, panne véhicule...), les tournées changent, donc la
+            # `structuralKey` du composant React change, donc TOUT le state d'animation
+            # React est réinitialisé (voir dvrp_map_component/frontend/src/index.jsx) —
+            # chaque camion repart virtuellement à 0 km sur son nouveau plan. À la toute
+            # première frame après ce reset, `deliveredIds` calculé côté navigateur est
+            # donc temporairement VIDE (aucun camion n'a encore reparcouru de distance),
+            # et cette valeur transitoire est immédiatement renvoyée à Python.
+            #
+            # Avec une simple affectation (`=`), cette valeur vide ÉCRASAIT
+            # `st.session_state.delivered_ids` : les commandes déjà livrées perdaient
+            # leur statut, étaient réintégrées dans `active_orders` (filtre plus haut)
+            # et renvoyées à OR-Tools comme si elles n'avaient jamais été livrées —
+            # provoquant une re-livraison logique (et potentiellement une boucle, un
+            # nouvel appel OR-Tools réinitialisant à nouveau le state React, etc.).
+            #
+            # `delivered_ids` doit être un ensemble MONOTONE CROISSANT : une commande
+            # livrée le reste, quel que soit le nombre de réoptimisations ultérieures.
+            st.session_state.delivered_ids |= set(result.get("delivered_ids", []))
 
             # REPLANIFICATION DYNAMIQUE : le composant React signale qu'une commande vient
             # d'atteindre son release_time (elle "arrive" à l'instant `sim_clock`). On fait
