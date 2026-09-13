@@ -93,7 +93,6 @@ DEFAULTS = {
                                # ne soit recréé (Streamlit interdit de modifier la clé
                                # d'un widget après qu'il a déjà été instancié dans le
                                # même run — voir section 3 plus bas).
-    "initial_snapshot": None, # paramètres au démarrage (capturés une fois)
 }
 for key, default in DEFAULTS.items():
     if key not in st.session_state:
@@ -190,30 +189,11 @@ auto_run = auto_run and st.session_state.simulation_started
 
 sim_time = int(st.session_state.sim_clock_min)
 
-# État initial ("avant démarrage") : capturé une seule fois (premier chargement de l'app,
-# ou clic sur "🔄 Réinitialiser l'horloge"). Reste figé pendant toute la simulation, pour
-# pouvoir comparer les paramètres de départ aux données finales une fois la tournée finie.
-if st.session_state.initial_snapshot is None or reset_clicked:
-    st.session_state.initial_snapshot = {
-        "dataset": dataset_choice,
-        "num_vehicles": num_vehicles,
-        "vehicle_capacity": vehicle_capacity,
-        "truck_speed_kmh": truck_speed_kmh,
-        "time_accel": time_accel_label,
-        "nb_commandes": len(df_orders),
-        "demande_totale": int(df_orders["demand_kg"].sum()),
-    }
-
-with st.expander("📋 État avant démarrage (paramètres initiaux)", expanded=False):
-    snap = st.session_state.initial_snapshot
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Jeu de données", snap["dataset"].split(" :")[0])
-    c1.metric("Camions disponibles", snap["num_vehicles"])
-    c2.metric("Capacité / camion", f"{snap['vehicle_capacity']} kg")
-    c2.metric("Vitesse moyenne", f"{snap['truck_speed_kmh']} km/h")
-    c3.metric("Commandes au départ", snap["nb_commandes"])
-    c3.metric("Demande totale initiale", f"{snap['demande_totale']} kg")
-    st.caption(f"Accélération du temps choisie : {snap['time_accel']}")
+st.caption(
+    f"⚙️ **Paramètres actuels** — {dataset_choice.split(' :')[0]} · {num_vehicles} camion(s) · "
+    f"{vehicle_capacity} kg/camion · {truck_speed_kmh} km/h · {time_accel_label} · "
+    f"{len(df_orders)} commande(s) au total ({int(df_orders['demand_kg'].sum())} kg)"
+)
 
 # ----------------------------------------------------------------------------
 # 4. BARRE LATÉRALE — ÉVÉNEMENTS DYNAMIQUES (désormais réellement actifs)
@@ -234,8 +214,8 @@ if manual_event_type == "ANNULATION_COMMANDE":
         [df_orders["id"], pd.Series([o["id"] for o in st.session_state.extra_orders], dtype=str)]
     )
     # Seules les commandes pas encore livrées (ni déjà annulées) peuvent être choisies —
-    # "delivered_ids" est recalculé à chaque affichage de la carte à partir de la
-    # progression réelle des camions sur leur tournée.
+    # "delivered_ids" est mis à jour par le composant React (dvrp_map_component) à
+    # chaque commande livrée, pas par un calcul périodique côté Python.
     cancellable_ids = [
         i for i in known_ids_now
         if i not in st.session_state.cancelled_ids and i not in st.session_state.delivered_ids
@@ -252,7 +232,13 @@ if st.sidebar.button("⚠️ Appliquer l'événement") and manual_event_type != 
     known_ids = pd.concat(
         [df_orders["id"], pd.Series([o["id"] for o in st.session_state.extra_orders], dtype=str)]
     )
-    candidate_ids = [i for i in known_ids if i not in st.session_state.cancelled_ids]
+    # Exclut aussi les commandes déjà livrées : un client ne peut pas être "absent" ni
+    # une alerte température prioriser une commande déjà remise (bug précédent : seules
+    # les commandes annulées étaient exclues ici).
+    candidate_ids = [
+        i for i in known_ids
+        if i not in st.session_state.cancelled_ids and i not in st.session_state.delivered_ids
+    ]
     detail = apply_event_effect(
         manual_event_type, st.session_state, depot_coords, sim_time, candidate_ids,
         manual_target=manual_cancel_target,
@@ -540,6 +526,12 @@ def render_simulation():
         )
         if result:
             st.session_state.delivered_ids = set(result.get("delivered_ids", []))
+            # Resynchronise l'horloge Python avec celle, réellement à jour, du composant
+            # (voir dvrp_map_component/frontend/src/index.jsx) — évite qu'un événement
+            # déclenché en cours de route ne reparte d'une horloge Python périmée et ne
+            # fasse reculer visuellement les camions au rechargement du composant.
+            if "sim_clock_min" in result:
+                st.session_state.sim_clock_min = float(result["sim_clock_min"])
             # Arrêt automatique de la simulation temps réel dès que toutes les livraisons
             # sont terminées (le composant React le signale via all_finished). On ne peut
             # pas modifier auto_run_active ici directement (le toggle est déjà instancié
