@@ -37,18 +37,14 @@ Corrections apportées par rapport à la version générée initialement :
     OR-Tools, regroupés ensuite par camion physique (dvrp_engine.py :
     group_multi_trip_routes). Le temps de rechargement au dépôt entre deux
     rotations n'est pas modélisé (supposé instantané).
-11. TRACKING & TABLEAU DE BORD CÔTÉ NAVIGATEUR (dvrp_map_component/) : l'horloge, le
-    déplacement des camions, l'apparition progressive des commandes, les KPI et le
-    tableau sont calculés et affichés côté navigateur (React), sans dépendre du rythme
-    des rerun Streamlit pour rester fluides.
-12. PLANIFICATION RÉELLEMENT DYNAMIQUE : seules les commandes déjà ARRIVÉES
-    (release_time atteint) sont routées par OR-Tools — pas l'ensemble du jeu de données
-    d'un coup. Le composant React signale à Python, en temps quasi réel, chaque nouvelle
-    arrivée (ainsi que chaque livraison, la fin de tournée, et environ toutes les 20 min
-    simulées pour garder l'horloge à jour) ; Python relance alors automatiquement une
-    réoptimisation OR-Tools complète pour intégrer la ou les nouvelles commandes. La
-    section "🗺️ Séquence de l'itinéraire construite" change donc à chaque arrivée,
-    reflétant toujours le plan actuellement en vigueur.
+11. TRACKING & SIMULATION 100% CÔTÉ NAVIGATEUR (dvrp_map_component/) : Python calcule
+    les itinéraires une seule fois par action réelle (démarrage, événement, changement
+    de paramètre) et transmet toutes les commandes (avec leur release_time) au composant
+    React. Ensuite, l'horloge, le déplacement des camions, l'apparition progressive des
+    commandes, les KPI et le tableau sont entièrement calculés et affichés côté
+    navigateur — aucune resynchronisation Python périodique pendant que ça tourne. Le
+    composant ne renvoie une valeur à Python que lorsqu'une commande est réellement
+    livrée (pour la liste des commandes annulables), jamais par sondage.
 """
 
 import math
@@ -193,11 +189,33 @@ auto_run = auto_run and st.session_state.simulation_started
 
 sim_time = int(st.session_state.sim_clock_min)
 
-st.caption(
-    f"⚙️ **Paramètres actuels** — {dataset_choice.split(' :')[0]} · {num_vehicles} camion(s) · "
-    f"{vehicle_capacity} kg/camion · {truck_speed_kmh} km/h · {time_accel_label} · "
-    f"{len(df_orders)} commande(s) au total ({int(df_orders['demand_kg'].sum())} kg)"
+# État ACTUEL des paramètres : recalculé à CHAQUE exécution du script (Streamlit relance
+# tout le script à chaque interaction — changement de slider, de sélecteur, événement
+# appliqué, etc.), donc ces valeurs reflètent toujours la configuration en vigueur au
+# moment présent plutôt qu'un instantané figé du tout premier chargement.
+current_orders_df = (
+    pd.concat([df_orders, pd.DataFrame(st.session_state.extra_orders, columns=COLUMNS)], ignore_index=True)
+    if st.session_state.extra_orders else df_orders
 )
+current_active_orders_df = current_orders_df[~current_orders_df["id"].isin(st.session_state.cancelled_ids)]
+current_effective_vehicles = max(1, num_vehicles - st.session_state.vehicle_breakdown_count)
+
+with st.expander("📋 État actuel (paramètres en vigueur)", expanded=False):
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Jeu de données", dataset_choice.split(" :")[0])
+    c1.metric("Camions disponibles", f"{current_effective_vehicles} / {num_vehicles}")
+    c2.metric("Capacité / camion", f"{vehicle_capacity} kg")
+    c2.metric("Vitesse moyenne", f"{truck_speed_kmh} km/h")
+    c3.metric("Commandes actives", len(current_active_orders_df))
+    c3.metric("Demande totale actuelle", f"{int(current_active_orders_df['demand_kg'].sum())} kg")
+    st.caption(
+        f"Accélération du temps : {time_accel_label} · Horloge simulée : "
+        f"{int(st.session_state.sim_clock_min)} min"
+        + (f" · 🚧 {st.session_state.vehicle_breakdown_count} véhicule(s) en panne"
+           if st.session_state.vehicle_breakdown_count else "")
+        + (f" · 🚦 trafic x{st.session_state.traffic_penalty:.1f}"
+           if st.session_state.traffic_penalty > 1.0 else "")
+    )
 
 # ----------------------------------------------------------------------------
 # 4. BARRE LATÉRALE — ÉVÉNEMENTS DYNAMIQUES (désormais réellement actifs)
@@ -218,8 +236,8 @@ if manual_event_type == "ANNULATION_COMMANDE":
         [df_orders["id"], pd.Series([o["id"] for o in st.session_state.extra_orders], dtype=str)]
     )
     # Seules les commandes pas encore livrées (ni déjà annulées) peuvent être choisies —
-    # "delivered_ids" est mis à jour par le composant React (dvrp_map_component) à
-    # chaque commande livrée, pas par un calcul périodique côté Python.
+    # "delivered_ids" est recalculé à chaque affichage de la carte à partir de la
+    # progression réelle des camions sur leur tournée.
     cancellable_ids = [
         i for i in known_ids_now
         if i not in st.session_state.cancelled_ids and i not in st.session_state.delivered_ids
@@ -236,13 +254,7 @@ if st.sidebar.button("⚠️ Appliquer l'événement") and manual_event_type != 
     known_ids = pd.concat(
         [df_orders["id"], pd.Series([o["id"] for o in st.session_state.extra_orders], dtype=str)]
     )
-    # Exclut aussi les commandes déjà livrées : un client ne peut pas être "absent" ni
-    # une alerte température prioriser une commande déjà remise (bug précédent : seules
-    # les commandes annulées étaient exclues ici).
-    candidate_ids = [
-        i for i in known_ids
-        if i not in st.session_state.cancelled_ids and i not in st.session_state.delivered_ids
-    ]
+    candidate_ids = [i for i in known_ids if i not in st.session_state.cancelled_ids]
     detail = apply_event_effect(
         manual_event_type, st.session_state, depot_coords, sim_time, candidate_ids,
         manual_target=manual_cancel_target,
@@ -338,25 +350,30 @@ def render_simulation():
             lambda r: st.session_state.priority_overrides.get(r["id"], r["priority"]), axis=1
         )
 
-    # Toutes les commandes connues et non annulées (pour l'affichage / la révélation
-    # progressive sur la carte, gérée par le composant React selon `release_time`).
-    all_known_orders = orders_df[
-        ~orders_df["id"].isin(st.session_state.cancelled_ids)
+    # RÉOPTIMISATION DYNAMIQUE RÉELLE : seules les commandes déjà "arrivées" (release_time
+    # <= horloge de simulation courante) ET pas encore livrées sont transmises au solveur.
+    # Les commandes futures (release_time > horloge) ne sont PAS routées tant qu'elles ne
+    # sont pas arrivées — elles apparaissent sur la carte à titre indicatif ("en attente")
+    # et déclenchent, au moment précis de leur arrivée, un vrai recalcul OR-Tools (voir la
+    # gestion de `new_order_arrived` plus bas). La séquence de tournée est donc recalculée
+    # à chaque commande livrée ET à chaque nouvelle commande arrivée, pas une seule fois au
+    # démarrage.
+    non_cancelled_orders = orders_df[~orders_df["id"].isin(st.session_state.cancelled_ids)]
+    delivered_ids = st.session_state.delivered_ids
+
+    active_orders = non_cancelled_orders[
+        (non_cancelled_orders["release_time"] <= sim_time)
+        & (~non_cancelled_orders["id"].isin(delivered_ids))
+    ].reset_index(drop=True)
+    future_orders = non_cancelled_orders[
+        non_cancelled_orders["release_time"] > sim_time
+    ].reset_index(drop=True)
+    delivered_orders = non_cancelled_orders[
+        non_cancelled_orders["id"].isin(delivered_ids)
     ].reset_index(drop=True)
 
-    # Seules les commandes DÉJÀ ARRIVÉES (release_time atteint) sont ROUTABLES : c'est ce
-    # qui rend la planification réellement DYNAMIQUE — une nouvelle commande n'est intégrée
-    # à la tournée qu'au moment où elle arrive, ce qui déclenche une réoptimisation OR-Tools
-    # complète (voir plus bas : le composant React signale immédiatement une nouvelle
-    # arrivée à Python, qui relance alors le calcul). La séquence d'itinéraire (§ "🗺️
-    # Séquence de l'itinéraire construite") reflète donc uniquement le plan actuel, basé
-    # sur les commandes connues à cet instant — et change à chaque nouvelle arrivée.
-    active_orders = all_known_orders[
-        all_known_orders["release_time"] <= sim_time
-    ].reset_index(drop=True)
-
-    if len(active_orders) == 0:
-        st.info("⏳ Aucune commande encore arrivée — la planification démarrera dès la première arrivée.")
+    if len(active_orders) == 0 and len(future_orders) == 0 and len(delivered_orders) == 0:
+        st.info("Aucune commande disponible — vérifiez les événements appliqués.")
         return
 
     effective_vehicles = max(1, num_vehicles - st.session_state.vehicle_breakdown_count)
@@ -366,75 +383,102 @@ def render_simulation():
             f"{effective_vehicles}/{num_vehicles} véhicule(s) réellement disponibles."
         )
 
-    coords_list = [depot_coords] + list(zip(active_orders["lat"], active_orders["lon"]))
-    demands = [0] + active_orders["demand_kg"].astype(int).tolist()
-
-    # Nombre de rotations par camion calculé automatiquement à partir de la demande totale
-    # et de la capacité réellement disponible (plus besoin de régler un curseur manuel).
-    # +1 rotation de marge : laisse au solveur une capacité légèrement excédentaire pour
-    # répartir les tournées efficacement (sinon, avec le compte pile, il peut n'exister
-    # aucune répartition valide même quand la capacité totale suffit tout juste).
     total_demand = int(active_orders["demand_kg"].sum())
-    max_trips_per_vehicle = max(
-        1, math.ceil(total_demand / (effective_vehicles * vehicle_capacity)) + 1
-    )
 
-    # Le solveur reçoit des véhicules "virtuels" (camion physique x trajets max autorisés),
-    # tous de même capacité : ça lui permet de répartir une commande sur plusieurs rotations
-    # d'un même camion si la capacité en un seul passage ne suffit pas.
-    virtual_vehicle_count = effective_vehicles * max_trips_per_vehicle
-    vehicle_capacities = [vehicle_capacity] * virtual_vehicle_count
+    if len(active_orders) > 0:
+        coords_list = [depot_coords] + list(zip(active_orders["lat"], active_orders["lon"]))
+        demands = [0] + active_orders["demand_kg"].astype(int).tolist()
 
-    # ----------------------------------------------------------------------------
-    # 7. CALCUL DVRP (OSRM + OR-Tools, avec capacité, rotations et pénalité de trafic)
-    # ----------------------------------------------------------------------------
-    with st.spinner("Calcul des distances et optimisation des tournées..."):
-        raw_dist_matrix = get_osrm_distance_matrix(tuple(coords_list))  # distances réelles (km affichés)
-        solver_dist_matrix = raw_dist_matrix
-        if st.session_state.traffic_penalty > 1.0:
-            # La pénalité de trafic influence UNIQUEMENT la décision d'OR-Tools (pour qu'il évite
-            # la zone concernée) ; les distances affichées restent les vraies distances physiques.
-            solver_dist_matrix = (np.array(raw_dist_matrix) * st.session_state.traffic_penalty).tolist()
-        virtual_routes = solve_dvrp_ortools(solver_dist_matrix, demands, vehicle_capacities)
-
-    total_capacity = vehicle_capacity * virtual_vehicle_count
-    if not virtual_routes:
-        st.error(
-            f"⚠️ Aucune tournée réalisable : {total_demand} kg de commandes pour "
-            f"{total_capacity} kg de capacité totale disponible ({effective_vehicles} véhicule(s) "
-            f"x {max_trips_per_vehicle} rotation(s), calculées automatiquement). "
-            f"Augmentez le nombre de véhicules ou leur capacité, ou réinitialisez les événements."
+        # Nombre de rotations par camion calculé automatiquement à partir de la demande totale
+        # et de la capacité réellement disponible (plus besoin de régler un curseur manuel).
+        # +1 rotation de marge : laisse au solveur une capacité légèrement excédentaire pour
+        # répartir les tournées efficacement (sinon, avec le compte pile, il peut n'exister
+        # aucune répartition valide même quand la capacité totale suffit tout juste).
+        max_trips_per_vehicle = max(
+            1, math.ceil(total_demand / (effective_vehicles * vehicle_capacity)) + 1
         )
-        st.stop()
 
-    # Regroupe les tournées virtuelles en rotations successives par camion physique.
-    truck_trips = group_multi_trip_routes(virtual_routes, effective_vehicles)
-    optimized_routes = [route for trips in truck_trips.values() for route in trips]  # pour les KPI globaux
-    total_trips = len(optimized_routes)
-    multi_trip_trucks = sum(1 for trips in truck_trips.values() if len(trips) > 1)
+        # Le solveur reçoit des véhicules "virtuels" (camion physique x trajets max autorisés),
+        # tous de même capacité : ça lui permet de répartir une commande sur plusieurs rotations
+        # d'un même camion si la capacité en un seul passage ne suffit pas.
+        virtual_vehicle_count = effective_vehicles * max_trips_per_vehicle
+        vehicle_capacities = [vehicle_capacity] * virtual_vehicle_count
+
+        # ----------------------------------------------------------------------------
+        # 7. CALCUL DVRP (OSRM + OR-Tools, avec capacité, rotations et pénalité de trafic)
+        #    Relancé à chaque fois que l'ensemble des commandes "arrivées" change : une
+        #    livraison qui vient de se terminer (commande retirée du problème) ou une
+        #    nouvelle commande qui vient d'atteindre son release_time (commande ajoutée
+        #    au problème) déclenchent chacune une VRAIE replanification OR-Tools ici.
+        # ----------------------------------------------------------------------------
+        with st.spinner("Calcul des distances et optimisation des tournées..."):
+            raw_dist_matrix = get_osrm_distance_matrix(tuple(coords_list))  # distances réelles (km affichés)
+            solver_dist_matrix = raw_dist_matrix
+            if st.session_state.traffic_penalty > 1.0:
+                # La pénalité de trafic influence UNIQUEMENT la décision d'OR-Tools (pour qu'il évite
+                # la zone concernée) ; les distances affichées restent les vraies distances physiques.
+                solver_dist_matrix = (np.array(raw_dist_matrix) * st.session_state.traffic_penalty).tolist()
+            virtual_routes = solve_dvrp_ortools(solver_dist_matrix, demands, vehicle_capacities)
+
+        total_capacity = vehicle_capacity * virtual_vehicle_count
+        if not virtual_routes:
+            st.error(
+                f"⚠️ Aucune tournée réalisable : {total_demand} kg de commandes pour "
+                f"{total_capacity} kg de capacité totale disponible ({effective_vehicles} véhicule(s) "
+                f"x {max_trips_per_vehicle} rotation(s), calculées automatiquement). "
+                f"Augmentez le nombre de véhicules ou leur capacité, ou réinitialisez les événements."
+            )
+            st.stop()
+
+        # Regroupe les tournées virtuelles en rotations successives par camion physique.
+        truck_trips = group_multi_trip_routes(virtual_routes, effective_vehicles)
+        optimized_routes = [route for trips in truck_trips.values() for route in trips]  # pour les KPI globaux
+        total_trips = len(optimized_routes)
+        multi_trip_trucks = sum(1 for trips in truck_trips.values() if len(trips) > 1)
+
+        # ----------------------------------------------------------------------------
+        # 7bis. PREUVE DE L'OPTIMISATION : distance réelle vs référence non optimisée
+        # ----------------------------------------------------------------------------
+        # On mesure la distance physique (raw_dist_matrix, sans la pénalité de trafic qui ne sert
+        # qu'à orienter le solveur) des tournées OR-Tools, et on la compare à une tournée « naïve »
+        # qui affecte les commandes dans leur ordre d'apparition, sans aucune optimisation.
+        optimized_distance_km = sum(route_distance(r, raw_dist_matrix) for r in optimized_routes) / 1000
+        baseline_routes = naive_baseline_routes(demands, vehicle_capacities)
+        baseline_distance_km = sum(route_distance(r, raw_dist_matrix) for r in baseline_routes) / 1000
+        gain_km = baseline_distance_km - optimized_distance_km
+        gain_pct = (gain_km / baseline_distance_km * 100) if baseline_distance_km > 0 else 0
+    else:
+        # Rien à router pour l'instant : soit tout est déjà livré, soit on attend l'arrivée
+        # de la prochaine commande (release_time pas encore atteint). On garde néanmoins
+        # l'interface active (carte + horloge) pour que le composant React continue de
+        # faire avancer le temps et puisse détecter l'arrivée de la prochaine commande,
+        # ce qui déclenchera alors une vraie replanification (voir plus bas).
+        coords_list = [depot_coords]
+        raw_dist_matrix = [[0.0]]
+        truck_trips = {}
+        optimized_routes = []
+        total_trips = 0
+        multi_trip_trucks = 0
+        virtual_vehicle_count = effective_vehicles
+        total_capacity = vehicle_capacity * effective_vehicles
+        optimized_distance_km = 0.0
+        baseline_distance_km = 0.0
+        gain_pct = 0.0
 
     # ----------------------------------------------------------------------------
-    # 7bis. PREUVE DE L'OPTIMISATION : distance réelle vs référence non optimisée
-    # ----------------------------------------------------------------------------
-    # On mesure la distance physique (raw_dist_matrix, sans la pénalité de trafic qui ne sert
-    # qu'à orienter le solveur) des tournées OR-Tools, et on la compare à une tournée « naïve »
-    # qui affecte les commandes dans leur ordre d'apparition, sans aucune optimisation.
-    optimized_distance_km = sum(route_distance(r, raw_dist_matrix) for r in optimized_routes) / 1000
-    baseline_routes = naive_baseline_routes(demands, vehicle_capacities)
-    baseline_distance_km = sum(route_distance(r, raw_dist_matrix) for r in baseline_routes) / 1000
-    gain_km = baseline_distance_km - optimized_distance_km
-    gain_pct = (gain_km / baseline_distance_km * 100) if baseline_distance_km > 0 else 0
-
-    # ----------------------------------------------------------------------------
-    # 8. INDICATEURS — recalculés à chaque réoptimisation (donc à chaque nouvelle
-    #    arrivée de commande, puisque la planification est désormais dynamique)
+    # 8. INDICATEURS STATIQUES (ne changent pas avec le temps simulé — donc Python
+    #    peut les afficher une fois pour toutes, sans resynchronisation périodique)
     # ----------------------------------------------------------------------------
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("📦 Quantité planifiée", f"{total_demand} kg", delta=f"capacité totale {total_capacity} kg")
+    k1.metric("📦 Quantité en tournée", f"{total_demand} kg", delta=f"capacité totale {total_capacity} kg")
     k2.metric("🚛 Camions utilisés", f"{len(truck_trips)} / {num_vehicles}")
     k3.metric("🔁 Trajets prévus", f"{total_trips}",
               delta=f"{multi_trip_trucks} en rotation multiple" if multi_trip_trucks else None)
-    k4.metric("📋 Commandes planifiées", f"{len(active_orders)} / {len(all_known_orders)}")
+    k4.metric("📋 Commandes en cours", f"{len(active_orders)}")
+    st.caption(
+        f"🕓 En attente d'arrivée : {len(future_orders)} · ✅ Déjà livrées : {len(delivered_orders)} "
+        f"· 🚚 En cours de tournée : {len(active_orders)}"
+    )
 
     if multi_trip_trucks:
         st.info(
@@ -506,22 +550,47 @@ def render_simulation():
                 "stops": stops, "total_km": cum_km, "speed_kmh": truck_speed_kmh,
             })
 
-        orders_payload = all_known_orders[
-            ["id", "client", "lat", "lon", "demand_kg", "temp_max", "time_window", "priority", "release_time"]
-        ].to_dict("records")
+        payload_cols = ["id", "client", "lat", "lon", "demand_kg", "temp_max", "time_window", "priority", "release_time"]
+
+        # Commandes réellement routées (arrivées, pas encore livrées) : rattachées à un
+        # arrêt d'un camion (via trucks_payload / stops ci-dessus).
+        orders_payload = active_orders[payload_cols].to_dict("records")
         for o in orders_payload:
             o["is_new"] = o["id"] in new_ids
+            o["pending"] = False
+            o["delivered"] = False
+
+        # Commandes futures (release_time pas encore atteint) : affichées à titre indicatif
+        # dès leur apparition sur la carte (marqueur en pointillés), mais PAS routées — dès
+        # que l'horloge atteint leur release_time, le composant React le signale à Python
+        # (voir `new_order_arrived` plus bas), ce qui déclenche une vraie replanification.
+        pending_payload = future_orders[payload_cols].to_dict("records")
+        for o in pending_payload:
+            o["is_new"] = False
+            o["pending"] = True
+            o["delivered"] = False
+
+        # Commandes déjà livrées : conservées dans le tableau de bord (statut "Livrée"),
+        # mais retirées du problème de routage pour toute replanification future.
+        delivered_payload = delivered_orders[payload_cols].to_dict("records")
+        for o in delivered_payload:
+            o["is_new"] = False
+            o["pending"] = False
+            o["delivered"] = True
+
+        orders_payload = orders_payload + pending_payload + delivered_payload
 
         cancelled_payload = orders_df[
             orders_df["id"].isin(st.session_state.cancelled_ids)
         ][["id", "client", "demand_kg", "priority"]].to_dict("records")
 
-        # Vrai composant Streamlit en React (dvrp_map_component/) : reçoit TOUT en une
-        # fois (itinéraires + toutes les commandes avec leur release_time) et fait vivre
-        # la simulation entièrement côté navigateur — horloge, déplacement des camions,
-        # apparition des commandes, KPI, tableau. Python ne resynchronise plus rien
-        # pendant que ça tourne. Seul un retour ponctuel (quand une commande est livrée)
-        # remonte vers Python, pour la liste des commandes annulables ci-dessous.
+        # Vrai composant Streamlit en React (dvrp_map_component/) : reçoit toutes les
+        # commandes connues (routées, en attente, livrées) et fait vivre la simulation
+        # côté navigateur — horloge, déplacement des camions, apparition des commandes,
+        # KPI, tableau. Deux types de retour déclenchent un vrai recalcul Python : une
+        # commande livrée (liste des commandes annulables) et une commande qui vient
+        # d'atteindre son release_time (`new_order_arrived`), qui force une replanification
+        # OR-Tools immédiate au lieu d'attendre le prochain événement manuel.
         result = dvrp_map(
             depot_coords, orders_payload, cancelled_payload, trucks_payload,
             sim_clock_start_min=float(sim_time),
@@ -537,36 +606,26 @@ def render_simulation():
         )
         if result:
             st.session_state.delivered_ids = set(result.get("delivered_ids", []))
-            # Resynchronise l'horloge Python avec celle, réellement à jour, du composant
-            # (voir dvrp_map_component/frontend/src/index.jsx) — évite qu'un événement
-            # déclenché en cours de route ne reparte d'une horloge Python périmée et ne
-            # fasse reculer visuellement les camions au rechargement du composant.
-            previous_sim_time = sim_time
-            if "sim_clock_min" in result:
-                st.session_state.sim_clock_min = float(result["sim_clock_min"])
-            new_sim_time = int(st.session_state.sim_clock_min)
 
-            # RÉPLANIFICATION DYNAMIQUE : si l'horloge a avancé, une ou plusieurs commandes
-            # ont pu "arriver" entre-temps (release_time désormais atteint). Le composant
-            # React signale toute nouvelle arrivée immédiatement (voir index.jsx), donc ce
-            # cas se présente dès qu'une commande devient visible — on relance aussitôt pour
-            # l'intégrer au plan (nouveau calcul OR-Tools), au lieu d'attendre un prochain
-            # événement. C'est ce qui rend "Séquence de l'itinéraire" vraiment dynamique.
-            if new_sim_time > previous_sim_time:
-                newly_arrived = all_known_orders[
-                    (all_known_orders["release_time"] > previous_sim_time)
-                    & (all_known_orders["release_time"] <= new_sim_time)
-                ]
-                if not newly_arrived.empty:
-                    st.rerun()
-
+            # REPLANIFICATION DYNAMIQUE : le composant React signale qu'une commande vient
+            # d'atteindre son release_time (elle "arrive" à l'instant `sim_clock`). On fait
+            # avancer l'horloge Python jusqu'à cet instant (pour que le filtre release_time
+            # <= horloge, plus haut, l'inclue désormais) puis on relance tout le script :
+            # active_orders changera, donc un nouveau calcul OR-Tools aura lieu et la
+            # séquence de l'itinéraire construite sera mise à jour en conséquence.
+            new_arrival_id = result.get("new_order_arrived")
+            if new_arrival_id:
+                arrival_clock = float(result.get("sim_clock", st.session_state.sim_clock_min))
+                st.session_state.sim_clock_min = max(st.session_state.sim_clock_min, arrival_clock)
+                log_event(f"🆕 Commande {new_arrival_id} arrivée → replanification de l'itinéraire.")
+                st.rerun()
             # Arrêt automatique de la simulation temps réel dès que toutes les livraisons
             # sont terminées (le composant React le signale via all_finished). On ne peut
             # pas modifier auto_run_active ici directement (le toggle est déjà instancié
             # dans CE run) : on passe par stop_requested, appliqué au tout début du
             # prochain run. Protégé par la vérification de auto_run_active pour ne
             # déclencher ce rerun qu'une seule fois (pas de boucle infinie une fois arrêté).
-            if result.get("all_finished") and st.session_state.auto_run_active:
+            elif result.get("all_finished") and st.session_state.auto_run_active:
                 st.session_state.stop_requested = True
                 log_event("⏹️ Simulation arrêtée automatiquement — toutes les livraisons sont terminées.")
                 st.rerun()
@@ -580,9 +639,18 @@ def render_simulation():
     with col_details:
         st.subheader("🗺️ Séquence de l'itinéraire construite")
         st.caption(
-            "📡 Plan dynamique : recalculé automatiquement à chaque nouvelle commande "
-            "qui arrive — reflète toujours l'itinéraire actuellement en vigueur."
+            "Recalculée automatiquement (nouvel appel OR-Tools) à chaque commande livrée "
+            "et à chaque nouvelle commande qui arrive à son heure — pas seulement lors des "
+            "événements déclenchés manuellement."
         )
+        if not truck_trips:
+            if len(future_orders) > 0:
+                st.caption(
+                    f"⏳ Aucun trajet actif pour l'instant — en attente de l'arrivée de "
+                    f"{len(future_orders)} commande(s) (replanification automatique dès arrivée)."
+                )
+            else:
+                st.caption("✅ Toutes les commandes connues ont déjà été livrées.")
         for p_idx, trips in truck_trips.items():
             truck_total_km = sum(route_distance(r, raw_dist_matrix) for r in trips) / 1000
             truck_total_load = sum(
