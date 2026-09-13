@@ -88,23 +88,11 @@ DEFAULTS = {
                                # qui la fait ensuite avancer lui-même (voir dvrp_map_component)
     "simulation_started": False,  # l'horloge ne bouge pas tant que ce n'est pas True
     "auto_run_active": False,     # état du toggle "Simulation temps réel" (clé du widget)
-    "stop_requested": False,  # demande d'arrêt (manuel ou automatique), appliquée au
-                               # tout début du prochain script run, AVANT que le toggle
-                               # ne soit recréé (Streamlit interdit de modifier la clé
-                               # d'un widget après qu'il a déjà été instancié dans le
-                               # même run — voir section 3 plus bas).
+    "initial_snapshot": None, # paramètres au démarrage (capturés une fois)
 }
 for key, default in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
-
-# Applique une demande d'arrêt en attente AVANT toute création de widget : c'est le
-# seul moment sûr pour modifier st.session_state["auto_run_active"], la clé du toggle
-# "Simulation temps réel" plus bas (Streamlit refuse cette modification une fois le
-# widget déjà instancié dans le run courant — StreamlitWidgetAlreadyInstantiatedError).
-if st.session_state.stop_requested:
-    st.session_state.auto_run_active = False
-    st.session_state.stop_requested = False
 
 
 def log_event(message: str) -> None:
@@ -116,7 +104,7 @@ def log_event(message: str) -> None:
 # 2. EN-TÊTE
 # ----------------------------------------------------------------------------
 st.title("🚚 Tracking en temps réel pour l'optimisation logistique : cas les tournées dynamiques DVRP")
-st.caption("Alger — livraison de produits frais / express")
+st.caption("Alger — livraison de produits frais / express — OSRM + Google OR-Tools + MQTT")
 st.markdown("---")
 
 # ----------------------------------------------------------------------------
@@ -181,19 +169,45 @@ if manual_advance_clicked:
     st.session_state.sim_clock_min = min(1440.0, st.session_state.sim_clock_min + 10.0)
 
 auto_run = st.sidebar.toggle("▶️ Simulation temps réel (auto-refresh)", key="auto_run_active")
-if st.sidebar.button("⏹️ Arrêter la simulation") and st.session_state.simulation_started:
-    st.session_state.stop_requested = True  # coupera auto_run_active au tout début du prochain run
-    st.session_state.simulation_started = False  # fait réapparaître le bouton "🚀 Démarrer"
+if st.sidebar.button("⏹️ Arrêter la simulation"):
+    st.session_state.auto_run_active = False
     st.rerun()
 auto_run = auto_run and st.session_state.simulation_started
 
-sim_time = int(st.session_state.sim_clock_min)
-
-st.caption(
-    f"⚙️ **Paramètres actuels** — {dataset_choice.split(' :')[0]} · {num_vehicles} camion(s) · "
-    f"{vehicle_capacity} kg/camion · {truck_speed_kmh} km/h · {time_accel_label} · "
-    f"{len(df_orders)} commande(s) au total ({int(df_orders['demand_kg'].sum())} kg)"
+sim_time = st.sidebar.slider(
+    "🕐 Heure de départ de la tournée", 0.0, 1440.0, step=5.0,
+    format="%.0f", key="sim_clock_min",
+    help="Une fois la simulation lancée, l'horloge avance ensuite toute seule dans "
+         "votre navigateur (aucun rechargement de page nécessaire). Ce curseur ne "
+         "bouge que lorsque vous agissez vous-même (+10 min, reset, événement).",
 )
+sim_time = int(sim_time)
+st.sidebar.caption(f"⏱️ {sim_time // 60:02d}:{sim_time % 60:02d}")
+
+# État initial ("avant démarrage") : capturé une seule fois (premier chargement de l'app,
+# ou clic sur "🔄 Réinitialiser l'horloge"). Reste figé pendant toute la simulation, pour
+# pouvoir comparer les paramètres de départ aux données finales une fois la tournée finie.
+if st.session_state.initial_snapshot is None or reset_clicked:
+    st.session_state.initial_snapshot = {
+        "dataset": dataset_choice,
+        "num_vehicles": num_vehicles,
+        "vehicle_capacity": vehicle_capacity,
+        "truck_speed_kmh": truck_speed_kmh,
+        "time_accel": time_accel_label,
+        "nb_commandes": len(df_orders),
+        "demande_totale": int(df_orders["demand_kg"].sum()),
+    }
+
+with st.expander("📋 État avant démarrage (paramètres initiaux)", expanded=False):
+    snap = st.session_state.initial_snapshot
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Jeu de données", snap["dataset"].split(" :")[0])
+    c1.metric("Camions disponibles", snap["num_vehicles"])
+    c2.metric("Capacité / camion", f"{snap['vehicle_capacity']} kg")
+    c2.metric("Vitesse moyenne", f"{snap['truck_speed_kmh']} km/h")
+    c3.metric("Commandes au départ", snap["nb_commandes"])
+    c3.metric("Demande totale initiale", f"{snap['demande_totale']} kg")
+    st.caption(f"Accélération du temps choisie : {snap['time_accel']}")
 
 # ----------------------------------------------------------------------------
 # 4. BARRE LATÉRALE — ÉVÉNEMENTS DYNAMIQUES (désormais réellement actifs)
@@ -214,8 +228,8 @@ if manual_event_type == "ANNULATION_COMMANDE":
         [df_orders["id"], pd.Series([o["id"] for o in st.session_state.extra_orders], dtype=str)]
     )
     # Seules les commandes pas encore livrées (ni déjà annulées) peuvent être choisies —
-    # "delivered_ids" est mis à jour par le composant React (dvrp_map_component) à
-    # chaque commande livrée, pas par un calcul périodique côté Python.
+    # "delivered_ids" est recalculé à chaque affichage de la carte à partir de la
+    # progression réelle des camions sur leur tournée.
     cancellable_ids = [
         i for i in known_ids_now
         if i not in st.session_state.cancelled_ids and i not in st.session_state.delivered_ids
@@ -232,13 +246,7 @@ if st.sidebar.button("⚠️ Appliquer l'événement") and manual_event_type != 
     known_ids = pd.concat(
         [df_orders["id"], pd.Series([o["id"] for o in st.session_state.extra_orders], dtype=str)]
     )
-    # Exclut aussi les commandes déjà livrées : un client ne peut pas être "absent" ni
-    # une alerte température prioriser une commande déjà remise (bug précédent : seules
-    # les commandes annulées étaient exclues ici).
-    candidate_ids = [
-        i for i in known_ids
-        if i not in st.session_state.cancelled_ids and i not in st.session_state.delivered_ids
-    ]
+    candidate_ids = [i for i in known_ids if i not in st.session_state.cancelled_ids]
     detail = apply_event_effect(
         manual_event_type, st.session_state, depot_coords, sim_time, candidate_ids,
         manual_target=manual_cancel_target,
@@ -432,10 +440,17 @@ def render_simulation():
             f"la capacité en un seul passage est insuffisante avec les paramètres actuels."
         )
 
-    # La preuve d'optimisation (distance avant/après, gain) n'est plus affichée ici de
-    # façon statique — elle apparaît désormais dans le panneau "🎉 Tournée terminée" du
-    # composant React, une fois la simulation effectivement terminée (voir plus bas :
-    # planned_distance_km / baseline_distance_km / gain_pct transmis à dvrp_map()).
+    st.markdown("##### 📏 Preuve d'optimisation — distance réellement parcourue")
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Distance après l'optimisation (OR-Tools)", f"{optimized_distance_km:.1f} km")
+    d2.metric("Distance avant l'optimisation", f"{baseline_distance_km:.1f} km")
+    d3.metric("Gain apporté par l'optimisation", f"-{gain_pct:.0f} %", delta=f"-{gain_km:.1f} km", delta_color="normal")
+    st.caption(
+        "La « référence » affecte les commandes aux véhicules dans leur ordre d'apparition, "
+        "sans aucune optimisation de séquence ni de répartition. La différence avec la colonne "
+        "de gauche mesure ce qu'OR-Tools apporte réellement (même contrainte de capacité, "
+        "mêmes distances routières réelles OSRM pour les deux)."
+    )
 
     if st.session_state.logs:
         st.info(f"Dernier événement : {st.session_state.logs[0]}")
@@ -444,7 +459,7 @@ def render_simulation():
     col_map, col_details = st.columns([2, 1])
 
     with col_map:
-        st.subheader("🗺 Carte")
+        st.subheader("🗺 Carte, KPI temps réel et suivi — tout est calculé côté navigateur")
 
         route_colors = ["blue", "green", "purple", "orange", "darkred", "cadetblue"]
 
@@ -526,20 +541,12 @@ def render_simulation():
         )
         if result:
             st.session_state.delivered_ids = set(result.get("delivered_ids", []))
-            # Resynchronise l'horloge Python avec celle, réellement à jour, du composant
-            # (voir dvrp_map_component/frontend/src/index.jsx) — évite qu'un événement
-            # déclenché en cours de route ne reparte d'une horloge Python périmée et ne
-            # fasse reculer visuellement les camions au rechargement du composant.
-            if "sim_clock_min" in result:
-                st.session_state.sim_clock_min = float(result["sim_clock_min"])
             # Arrêt automatique de la simulation temps réel dès que toutes les livraisons
-            # sont terminées (le composant React le signale via all_finished). On ne peut
-            # pas modifier auto_run_active ici directement (le toggle est déjà instancié
-            # dans CE run) : on passe par stop_requested, appliqué au tout début du
-            # prochain run. Protégé par la vérification de auto_run_active pour ne
-            # déclencher ce rerun qu'une seule fois (pas de boucle infinie une fois arrêté).
+            # sont terminées (le composant React le signale via all_finished). Protégé par
+            # la vérification de auto_run_active pour ne déclencher ce rerun qu'une seule
+            # fois (pas de boucle infinie une fois la simulation arrêtée).
             if result.get("all_finished") and st.session_state.auto_run_active:
-                st.session_state.stop_requested = True
+                st.session_state.auto_run_active = False
                 log_event("⏹️ Simulation arrêtée automatiquement — toutes les livraisons sont terminées.")
                 st.rerun()
 

@@ -53,12 +53,10 @@ function fmtClock(min) {
  * une fois toutes les données nécessaires (itinéraires + toutes les commandes avec leur
  * `release_time`) et fait vivre la simulation lui-même.
  *
- * Un retour vers Python (`Streamlit.setComponentValue`) a lieu quand l'ensemble des
- * commandes livrées change, quand la tournée se termine, ou environ toutes les 20 min
- * simulées (pour garder l'horloge Python à peu près à jour, sans ajouter de sondage
- * périodique dédié — ce retour inclut aussi l'horloge courante). Sert à alimenter la
- * liste des commandes annulables et à éviter qu'un événement déclenché en cours de
- * route ne reparte d'une horloge Python périmée.
+ * Un seul retour vers Python (`Streamlit.setComponentValue`), et seulement quand
+ * l'ensemble des commandes livrées change réellement — sert à alimenter la liste des
+ * commandes annulables côté Python (barre latérale). Ce n'est pas du polling : c'est un
+ * événement, déclenché uniquement quand quelque chose se produit réellement.
  */
 function DvrpMap({ args }) {
   const {
@@ -210,17 +208,10 @@ function DvrpMap({ args }) {
           simClockMin, visibleCount, totalOrders: orders.length,
           deliveredIds, distanceParcourue, allFinished: allUsedFinished,
         });
-        const reportKey = JSON.stringify([deliveredIds.sort(), allUsedFinished, Math.floor(simClockMin / 20)]);
+        const reportKey = JSON.stringify(deliveredIds.sort());
         if (reportKey !== lastReportedRef.current) {
           lastReportedRef.current = reportKey;
-          // On renvoie aussi l'horloge courante à Python à cette occasion (pas d'appel
-          // supplémentaire créé exprès pour ça) : ça évite qu'un événement déclenché en
-          // cours de route (ex. panne véhicule) ne reparte d'une horloge Python périmée
-          // et ne fasse "reculer" visuellement les camions au rechargement du composant.
-          // Le checkpoint toutes les ~20 min simulées borne l'écart même sans livraison.
-          Streamlit.setComponentValue({
-            delivered_ids: deliveredIds, all_finished: allUsedFinished, sim_clock_min: simClockMin,
-          });
+          Streamlit.setComponentValue({ delivered_ids: deliveredIds, all_finished: allUsedFinished });
         }
       }
       frameId = requestAnimationFrame(animate);
@@ -310,7 +301,7 @@ function DvrpMap({ args }) {
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">📋 Commandes visibles</div>
           <div className="dvrp-kpi-value">{kpi.visibleCount} / {kpi.totalOrders}</div>
-          {upcomingCount > 0 && <div className="dvrp-kpi-sub">{upcomingCount} pas encore arrivée(s)</div>}
+          {upcomingCount > 0 && <div className="dvrp-kpi-sub">{upcomingCount} à venir</div>}
         </div>
         <div className="dvrp-kpi-card">
           <div className="dvrp-kpi-label">✅ Commandes livrées</div>

@@ -29,15 +29,14 @@ IOTDVRP_complet/
 ```
 
 Fonctionnalités incluses : optimisation OR-Tools multi-trajets automatique, horloge
-de simulation unique démarrée à 0 (bouton "🚀 Démarrer la simulation"), bouton
-"⏹️ Arrêter la simulation" + arrêt automatique en fin de tournée, carte animée en
-React avec tableau de bord complet (horloge HH:MM, KPI, tableau des commandes visibles
-avec leur statut de livraison, panneau de résultats finaux) — tout calculé côté
-navigateur, avec resynchronisation ponctuelle de l'horloge Python (à chaque livraison,
-fin de tournée, ou ~20 min simulées) pour éviter tout retour en arrière visuel lors
-d'un événement. Événements dynamiques (annulation manuelle restreinte aux commandes
-non livrées, panne, embouteillage...). Affichage permanent des paramètres actuellement
-choisis par l'utilisateur (dataset, camions, capacité, vitesse, accélération).
+de simulation unique démarrée à 0 (bouton "🚀 Démarrer la simulation"), carte animée
+en React avec tableau de bord complet — horloge au format HH:MM, KPI, tableau des
+commandes (masque les commandes pas encore visibles, indique clairement les commandes
+livrées), panneau de résultats finaux — **tout calculé et affiché côté navigateur,
+sans aucune resynchronisation Python périodique**. Bouton **"⏹️ Arrêter la
+simulation"**, et **arrêt automatique** dès que toutes les livraisons sont terminées.
+Événements dynamiques (annulation manuelle restreinte aux commandes non livrées,
+panne, embouteillage...), état initial avant démarrage.
 
 ## Étape 1 — Créer le nouveau dépôt GitHub
 
@@ -79,13 +78,12 @@ continu, qui se redéploie automatiquement à chaque nouveau commit sur `main`.
 
 - Ouvrez l'URL, cliquez sur **🚀 Démarrer la simulation**
 - La carte, l'horloge, les KPI et le tableau (composant React) doivent s'afficher
-- Activez **▶️ Simulation temps réel** : l'horloge (HH:MM), les camions, les KPI et
-  le tableau avancent tout seuls
+- Activez **▶️ Simulation temps réel** : l'horloge (format HH:MM), les camions, les
+  KPI et le tableau avancent tout seuls
 - Cliquez sur **⏹️ Arrêter la simulation** pour stopper manuellement à tout moment
-- Laissez tourner jusqu'à la fin : la simulation doit **s'arrêter d'elle-même** et
+- Laissez tourner jusqu'à la fin : la simulation doit **s'arrêter d'elle-même** dès
+  que toutes les commandes sont livrées, et le panneau "🎉 Tournée terminée" doit
   afficher les résultats finaux
-- Déclenchez un événement (ex. panne véhicule) en cours de route : les camions ne
-  doivent **plus repartir du début** (bug corrigé)
 
 ## Comment ça marche (résumé technique)
 
@@ -94,10 +92,10 @@ Python calcule les itinéraires OR-Tools **une seule fois** par action réelle
 React **toutes** les commandes (avec leur `release_time`) plus les itinéraires
 complets. Le composant fait ensuite vivre la simulation entièrement lui-même :
 horloge, position des camions, apparition progressive des commandes, KPI, tableau —
-aucun appel serveur périodique dédié. Il ne renvoie une valeur à Python que lorsqu'une
-commande est livrée, que la tournée se termine, ou environ toutes les 20 min simulées
-(pour garder l'horloge Python à peu près à jour) — des événements ponctuels, jamais un
-sondage.
+aucun appel serveur périodique. Il ne renvoie une valeur à Python que (a) lorsqu'une
+commande est réellement livrée, ou (b) lorsque toutes les livraisons sont terminées
+(ce qui déclenche l'arrêt automatique côté Python) — des événements ponctuels, jamais
+un sondage.
 
 ## Problèmes fréquents
 
