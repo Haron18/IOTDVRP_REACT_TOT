@@ -88,11 +88,24 @@ DEFAULTS = {
                                # qui la fait ensuite avancer lui-même (voir dvrp_map_component)
     "simulation_started": False,  # l'horloge ne bouge pas tant que ce n'est pas True
     "auto_run_active": False,     # état du toggle "Simulation temps réel" (clé du widget)
+    "stop_requested": False,  # demande d'arrêt (manuel ou automatique), appliquée au
+                               # tout début du prochain script run, AVANT que le toggle
+                               # ne soit recréé (Streamlit interdit de modifier la clé
+                               # d'un widget après qu'il a déjà été instancié dans le
+                               # même run — voir section 3 plus bas).
     "initial_snapshot": None, # paramètres au démarrage (capturés une fois)
 }
 for key, default in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+# Applique une demande d'arrêt en attente AVANT toute création de widget : c'est le
+# seul moment sûr pour modifier st.session_state["auto_run_active"], la clé du toggle
+# "Simulation temps réel" plus bas (Streamlit refuse cette modification une fois le
+# widget déjà instancié dans le run courant — StreamlitWidgetAlreadyInstantiatedError).
+if st.session_state.stop_requested:
+    st.session_state.auto_run_active = False
+    st.session_state.stop_requested = False
 
 
 def log_event(message: str) -> None:
@@ -104,7 +117,7 @@ def log_event(message: str) -> None:
 # 2. EN-TÊTE
 # ----------------------------------------------------------------------------
 st.title("🚚 Tracking en temps réel pour l'optimisation logistique : cas les tournées dynamiques DVRP")
-st.caption("Alger — livraison de produits frais / express — OSRM + Google OR-Tools + MQTT")
+st.caption("Alger — livraison de produits frais / express")
 st.markdown("---")
 
 # ----------------------------------------------------------------------------
@@ -169,20 +182,13 @@ if manual_advance_clicked:
     st.session_state.sim_clock_min = min(1440.0, st.session_state.sim_clock_min + 10.0)
 
 auto_run = st.sidebar.toggle("▶️ Simulation temps réel (auto-refresh)", key="auto_run_active")
-if st.sidebar.button("⏹️ Arrêter la simulation"):
-    st.session_state.auto_run_active = False
+if st.sidebar.button("⏹️ Arrêter la simulation") and st.session_state.simulation_started:
+    st.session_state.stop_requested = True  # coupera auto_run_active au tout début du prochain run
+    st.session_state.simulation_started = False  # fait réapparaître le bouton "🚀 Démarrer"
     st.rerun()
 auto_run = auto_run and st.session_state.simulation_started
 
-sim_time = st.sidebar.slider(
-    "🕐 Heure de départ de la tournée", 0.0, 1440.0, step=5.0,
-    format="%.0f", key="sim_clock_min",
-    help="Une fois la simulation lancée, l'horloge avance ensuite toute seule dans "
-         "votre navigateur (aucun rechargement de page nécessaire). Ce curseur ne "
-         "bouge que lorsque vous agissez vous-même (+10 min, reset, événement).",
-)
-sim_time = int(sim_time)
-st.sidebar.caption(f"⏱️ {sim_time // 60:02d}:{sim_time % 60:02d}")
+sim_time = int(st.session_state.sim_clock_min)
 
 # État initial ("avant démarrage") : capturé une seule fois (premier chargement de l'app,
 # ou clic sur "🔄 Réinitialiser l'horloge"). Reste figé pendant toute la simulation, pour
@@ -440,17 +446,10 @@ def render_simulation():
             f"la capacité en un seul passage est insuffisante avec les paramètres actuels."
         )
 
-    st.markdown("##### 📏 Preuve d'optimisation — distance réellement parcourue")
-    d1, d2, d3 = st.columns(3)
-    d1.metric("Distance après l'optimisation (OR-Tools)", f"{optimized_distance_km:.1f} km")
-    d2.metric("Distance avant l'optimisation", f"{baseline_distance_km:.1f} km")
-    d3.metric("Gain apporté par l'optimisation", f"-{gain_pct:.0f} %", delta=f"-{gain_km:.1f} km", delta_color="normal")
-    st.caption(
-        "La « référence » affecte les commandes aux véhicules dans leur ordre d'apparition, "
-        "sans aucune optimisation de séquence ni de répartition. La différence avec la colonne "
-        "de gauche mesure ce qu'OR-Tools apporte réellement (même contrainte de capacité, "
-        "mêmes distances routières réelles OSRM pour les deux)."
-    )
+    # La preuve d'optimisation (distance avant/après, gain) n'est plus affichée ici de
+    # façon statique — elle apparaît désormais dans le panneau "🎉 Tournée terminée" du
+    # composant React, une fois la simulation effectivement terminée (voir plus bas :
+    # planned_distance_km / baseline_distance_km / gain_pct transmis à dvrp_map()).
 
     if st.session_state.logs:
         st.info(f"Dernier événement : {st.session_state.logs[0]}")
@@ -459,7 +458,7 @@ def render_simulation():
     col_map, col_details = st.columns([2, 1])
 
     with col_map:
-        st.subheader("🗺 Carte, KPI temps réel et suivi — tout est calculé côté navigateur")
+        st.subheader("🗺 Carte")
 
         route_colors = ["blue", "green", "purple", "orange", "darkred", "cadetblue"]
 
@@ -542,11 +541,13 @@ def render_simulation():
         if result:
             st.session_state.delivered_ids = set(result.get("delivered_ids", []))
             # Arrêt automatique de la simulation temps réel dès que toutes les livraisons
-            # sont terminées (le composant React le signale via all_finished). Protégé par
-            # la vérification de auto_run_active pour ne déclencher ce rerun qu'une seule
-            # fois (pas de boucle infinie une fois la simulation arrêtée).
+            # sont terminées (le composant React le signale via all_finished). On ne peut
+            # pas modifier auto_run_active ici directement (le toggle est déjà instancié
+            # dans CE run) : on passe par stop_requested, appliqué au tout début du
+            # prochain run. Protégé par la vérification de auto_run_active pour ne
+            # déclencher ce rerun qu'une seule fois (pas de boucle infinie une fois arrêté).
             if result.get("all_finished") and st.session_state.auto_run_active:
-                st.session_state.auto_run_active = False
+                st.session_state.stop_requested = True
                 log_event("⏹️ Simulation arrêtée automatiquement — toutes les livraisons sont terminées.")
                 st.rerun()
 
